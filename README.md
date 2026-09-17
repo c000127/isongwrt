@@ -26,8 +26,23 @@ OpenWrt / iStoreOS 上的 **sing-box 轻量管理面板**（LuCI 应用）。
 wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
 ```
 
-> `raw.githubusercontent.com` 在部分网络（含国内）不可达，因此脚本与 feed 默认走 **jsDelivr CDN**，
-> 并自动回退 `fastly.jsdelivr.net` → `raw.githubusercontent.com`；可用 `ISONGWRT_FEED_BASE` 指定自建镜像。
+**下载源可选**（脚本含 GitHub 相关域名时都会让你选，交互运行时弹菜单，管道运行时用参数/环境变量）：
+
+```sh
+# 1) 镜像优先 jsDelivr（默认，国内可用）
+wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
+
+# 2) GitHub 直连优先
+wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh -s -- --source=direct
+
+# 3) 自定义源
+wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh -s -- --source=custom \
+  # 需同时给出：ISONGWRT_FEED_BASE（feed 镜像根）与/或 ISONGWRT_GH_PROXY（GitHub 加速前缀，如 https://ghfast.top/）
+```
+
+> 说明：`raw.githubusercontent.com` 在部分网络（含国内）不可达，因此默认走 **jsDelivr CDN**
+> （自动回退 `fastly.jsdelivr.net` → GitHub 直连）。上述选择对 `feed.sh` 同样适用
+> （`--source=mirror|direct|custom`，或 `ISONGWRT_SOURCE=`）。
 
 分两步自己控制：
 

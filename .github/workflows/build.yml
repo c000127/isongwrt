@@ -40,9 +40,12 @@ jobs:
           PACKAGES: luci-app-isongwrt
           # INDEX=1 → 生成 feed 索引（ipk: Packages.gz / apk: packages.adb）
           INDEX: 1
-          # 可选签名：配置对应 secrets 后 feed 自动签名（留空 = 未签名，安装时用 --allow-untrusted）
-          KEY_BUILD: ${{ secrets.KEY_BUILD }}
-          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          # 按分支分别签名：
+          #  - 24.10（opkg/ipk）：usign 密钥签名 feed（已验证可用）
+          #  - 25.12（apk）：SDK 侧 apk 签名构建目前失败（luci-base/lua host-compile 报错），
+          #    故暂不传 PRIVATE_KEY → 索引未签名，客户端用 --allow-untrusted（脚本已自动处理）
+          KEY_BUILD: ${{ matrix.branch == 'openwrt-24.10' && secrets.KEY_BUILD || '' }}
+          PRIVATE_KEY: ${{ matrix.branch == 'openwrt-25.12' && secrets.PRIVATE_KEY || '' }}
           NO_REFRESH_CHECK: true
 
       - name: stage-feed
