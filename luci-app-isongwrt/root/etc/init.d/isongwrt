@@ -15,6 +15,12 @@ start_service() {
 	[ -x "$core_path" ] || { logger -t isongwrt "core not found: $core_path"; return 1; }
 	[ -d "$conf_dir" ]  || { logger -t isongwrt "conf dir not found: $conf_dir"; return 1; }
 
+	# 依据当前 UCI 重新生成 API/面板分片（保存并应用 → procd reload → 这里生效）
+	if [ -x /usr/lib/isongwrt/ctl ]; then
+		/usr/lib/isongwrt/ctl api-sync >/dev/null 2>&1 || \
+			logger -t isongwrt "api-sync 失败（将使用现有分片）"
+	fi
+
 	procd_open_instance
 	procd_set_param command "$core_path" run -D "$work_dir" -C "$conf_dir"
 	procd_set_param respawn 3600 5 5

@@ -14,6 +14,8 @@ permissions:
   contents: write
 
 jobs:
+  # 说明：CI 只构建 LuCI 应用包（luci-app-isongwrt）。
+  # sing-box 内核不在此编译——由面板「内核管理」从官方 Releases 下载匹配架构的内核。
   build:
     name: ${{ matrix.arch }}-${{ matrix.branch }}
     runs-on: ubuntu-latest
