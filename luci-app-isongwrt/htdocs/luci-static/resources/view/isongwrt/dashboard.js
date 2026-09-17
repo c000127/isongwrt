@@ -1,132 +1,91 @@
 'use strict';
 'require view';
-'require dom';
+'require form';
 'require ui';
 'require tools.isongwrt as iso';
 
-function field(title, input, desc) {
-	return E('div', { 'class': 'cbi-value' }, [
-		E('label', { 'class': 'cbi-value-title' }, title),
-		E('div', { 'class': 'cbi-value-field' }, [ input,
-			desc ? E('div', { 'class': 'cbi-value-description' }, desc) : '' ])
-	]);
-}
-
 return view.extend({
 	load: function () {
-		return Promise.all([ iso.loadUci(), iso.call(['status']) ]);
+		return iso.loadUci();
 	},
 
-	render: function (data) {
-		this.status = data[1] || {};
-		this.cfg = {
-			api_listen: iso.get('api_listen', '127.0.0.1'),
-			api_port: iso.get('api_port', '9090'),
-			api_secret: iso.get('api_secret', ''),
-			dashboard: iso.get('dashboard', '1') === '1',
-			clash_api: iso.get('clash_api', '0') === '1',
-			clash_port: iso.get('clash_port', '9091'),
-			clash_secret: iso.get('clash_secret', ''),
-			dashboard_download_url: iso.get('dashboard_download_url', '')
+	render: function () {
+		var m, s, o, self = this;
+
+		function panelUrl() {
+			var port = iso.get('api_port', '9090');
+			return window.location.protocol + '//' + window.location.hostname + ':' + port + '/dashboard/';
+		}
+
+		function regenSecret() {
+			return iso.busy(iso.call(['api-secret-new']), '生成新密钥…').then(function (r) {
+				iso.notify(r, '已生成新访问密钥（保存并应用后生效）');
+				return iso.call(['status']);
+			}).then(function () {
+				window.location.reload();
+			});
+		}
+
+		m = new form.Map('isongwrt', '面板（Dashboard）',
+			'sing-box 1.14+ 内置 API 服务：开启后内核自动下载官方 sing-box-dashboard 并在 ' +
+			'/dashboard/ 提供，随内核更新（默认每天检查）。监听地址固定为 0.0.0.0（局域网可访问），' +
+			'访问密钥已自动生成。设置改动后请「保存并应用」。');
+
+		s = m.section(form.NamedSection, 'main', 'isongwrt', 'API / 官方面板');
+		s.anonymous = true;
+
+		o = s.option(form.Flag, 'dashboard', '启用官方面板',
+			'关闭后仅保留其它 API 功能；若同时未启用 Clash API，将移除 API 分片文件。');
+		o.default = '1';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'api_port', '监听端口',
+			'默认 9090 与 mihomo/nikki 的 Clash API 相同，同机部署请改为其它端口（如 9095）。');
+		o.datatype = 'port';
+		o.default = '9090';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'api_secret', '访问密钥',
+			'面板登录与 API 客户端使用（Authorization: Bearer）。已默认生成，可点右侧按钮重新生成。');
+		o.rmempty = false;
+
+		o = s.option(form.Button, 'regen');
+		o.inputstyle = 'action';
+		o.inputtitle = '生成新密钥';
+		o.onclick = regenSecret;
+
+		o = s.option(form.Value, 'dashboard_download_url', '面板资源下载地址',
+			'留空 = 官方 gh-pages zip；网络受限可填镜像。也可手工把面板文件放入工作目录的 dashboard/ ' +
+			'（非空且无 .etag 时按原样提供、不再自动更新）。');
+
+		s = m.section(form.NamedSection, 'main', 'isongwrt', '可选：Clash API（zashboard / metacubexd）');
+		s.anonymous = true;
+
+		o = s.option(form.Flag, 'clash_api', '启用 Clash API',
+			'官方 dashboard 走 gRPC API；Clash 协议面板（zashboard 等）需要这一项。');
+		o.default = '0';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'clash_port', 'Clash 端口');
+		o.datatype = 'port';
+		o.default = '9091';
+		o.rmempty = false;
+
+		o = s.option(form.Value, 'clash_secret', 'Clash 密钥');
+		o.rmempty = false;
+
+		s = m.section(form.TableSection, 'info', '面板入口');
+		s.anonymous = true;
+		o = s.option(form.DummyValue, '_url');
+		o.cfgvalue = function () {
+			var url = panelUrl();
+			return E('div', {}, [
+				E('a', { 'href': url, 'target': '_blank' }, url),
+				E('div', { 'class': 'cbi-value-description' },
+					'浏览器首次打开需输入上方「访问密钥」；局域网内其它设备同样可访问。')
+			]);
 		};
-		this.root = E('div', { 'class': 'cbi-map' });
-		this.paint();
-		return this.root;
-	},
 
-	save: function () {
-		var self = this, c = this.cfg;
-		iso.set('api_listen', c.api_listen);
-		iso.set('api_port', c.api_port);
-		iso.set('api_secret', c.api_secret);
-		iso.set('dashboard', c.dashboard ? '1' : '0');
-		iso.set('clash_api', c.clash_api ? '1' : '0');
-		iso.set('clash_port', c.clash_port);
-		iso.set('clash_secret', c.clash_secret);
-		iso.set('dashboard_download_url', c.dashboard_download_url);
-		return iso.applyUci().then(function () {
-			return iso.busy(iso.call(['api-sync']), '生成 API 分片并校验…');
-		}).then(function (r) {
-			iso.notify(r, 'API 分片已更新');
-			if (r && r.ok)
-				return iso.busy(iso.call(['service', 'restart']), '重启服务…').then(function (r2) {
-					iso.notify(r2, '服务已重启');
-					return iso.call(['status']).then(function (st) { self.status = st || {}; self.paint(); });
-				});
-		});
-	},
-
-	paint: function () {
-		var self = this, c = this.cfg, st = this.status || {};
-		var url = window.location.protocol + '//' + window.location.hostname + ':' + c.api_port + '/dashboard/';
-		dom.content(this.root, [
-			E('h2', {}, '面板（Dashboard）'),
-			E('div', { 'class': 'cbi-map-descr' },
-				'sing-box 1.14+ 内置 API 服务：开启后会从官方仓库自动下载 sing-box-dashboard 并在 /dashboard/ 提供，随内核一起更新（默认每天检查）。API 与面板均由内核自身托管，无需额外安装前端包。'),
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, 'API / 官方面板'),
-				field('启用面板', E('input', {
-					'type': 'checkbox', 'checked': c.dashboard ? '' : null,
-					'change': ui.createHandlerFn(this, function (ev) { this.cfg.dashboard = ev.target.checked; })
-				}), '关闭后仅保留其它 API 功能（若同时未启用 Clash API，则自动移除 API 分片文件）'),
-				field('监听地址', E('input', {
-					'type': 'text', 'class': 'cbi-input-text', 'value': c.api_listen,
-					'input': ui.createHandlerFn(this, function (ev) { this.cfg.api_listen = ev.target.value; })
-				}), '127.0.0.1 = 仅本机；0.0.0.0 = 允许局域网访问面板（请同时设置访问密钥）'),
-				field('监听端口', E('input', {
-					'type': 'text', 'class': 'cbi-input-text', 'value': c.api_port,
-					'input': ui.createHandlerFn(this, function (ev) { this.cfg.api_port = ev.target.value; })
-				})),
-				field('访问密钥', E('input', {
-					'type': 'text', 'class': 'cbi-input-text', 'value': c.api_secret,
-					'input': ui.createHandlerFn(this, function (ev) { this.cfg.api_secret = ev.target.value; })
-				}), '客户端以 Authorization: Bearer <secret> 认证；面板登录时填写此密钥'),
-				field('面板资源下载地址', E('input', {
-					'type': 'text', 'class': 'cbi-input-text', 'value': c.dashboard_download_url,
-					'placeholder': '留空 = 官方 gh-pages zip',
-					'input': ui.createHandlerFn(this, function (ev) { this.cfg.dashboard_download_url = ev.target.value; })
-				}), 'CN 网络下载慢时可填镜像地址；也可手工把面板文件放入 工作目录/dashboard/（非空且无 .etag 时按原样提供、不再自动更新）')
-			]),
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, '可选：Clash API（zashboard / metacubexd 等面板）'),
-				field('启用 Clash API', E('input', {
-					'type': 'checkbox', 'checked': c.clash_api ? '' : null,
-					'change': ui.createHandlerFn(this, function (ev) { this.cfg.clash_api = ev.target.checked; })
-				}), '官方 dashboard 使用 gRPC API；Clash 协议面板需要这一项'),
-				field('Clash 端口', E('input', {
-					'type': 'text', 'class': 'cbi-input-text', 'value': c.clash_port,
-					'input': ui.createHandlerFn(this, function (ev) { this.cfg.clash_port = ev.target.value; })
-				})),
-				field('Clash 密钥', E('input', {
-					'type': 'text', 'class': 'cbi-input-text', 'value': c.clash_secret,
-					'input': ui.createHandlerFn(this, function (ev) { this.cfg.clash_secret = ev.target.value; })
-				}))
-			]),
-			E('div', { 'class': 'cbi-page-actions' }, [
-				E('button', {
-					'class': 'btn cbi-button cbi-button-apply',
-					'click': ui.createHandlerFn(this, function () { return this.save(); })
-				}, '保存并应用'),
-				E('a', { 'class': 'btn cbi-button', 'href': url, 'target': '_blank', 'style': 'margin-left:1em' },
-					'打开面板（' + url + '）'),
-				E('button', {
-					'class': 'btn cbi-button', 'style': 'margin-left:1em',
-					'click': ui.createHandlerFn(this, function () {
-						return iso.busy(iso.call(['service', 'restart']), '重启服务…').then(function (r) {
-							iso.notify(r, '服务已重启');
-						});
-					})
-				}, '重启服务')
-			]),
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, '状态'),
-				E('p', {}, '内核：' + (st.version || '未安装') + '　运行：' + (st.running ? '是' : '否')
-					+ '　API：' + (st.api || '-') + '　面板分片：' + (st.dashboard ? '已启用' : '未启用'))
-			])
-		]);
-	},
-
-	handleSave: null,
-	handleSaveApply: null,
-	handleReset: null
+		return m.render();
+	}
 });

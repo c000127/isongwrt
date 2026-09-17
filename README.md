@@ -4,7 +4,7 @@ OpenWrt / iStoreOS 上的 **sing-box 轻量管理面板**（LuCI 应用）。
 
 | 功能 | 说明 |
 |---|---|
-| 内核分级管理 | 从官方 `SagerNet/sing-box` 安装/切换内核：`stable` / `rc` / `beta` / `alpha`，自动匹配架构（优先 musl），支持指定版本、多版本共存、回滚 |
+| 内核分级管理 | 内核**一律取自官方 Releases**（`SagerNet/sing-box`，本项目不编译内核）：`stable` / `rc` / `beta` / `alpha` 四级渠道 + 「检查更新」列各分支最新版，自动匹配架构（优先 musl），支持指定版本、多版本共存、回滚 |
 | 配置管理 | 上传或在线编辑配置，保存前自动 `sing-box check`，失败自动回退；自动备份/恢复 |
 | 启停控制 | procd 托管（崩溃拉起、开机自启），启动失败直接回显内核日志原因 |
 | 日志 | 面板查看内核 syslog，支持自动刷新 |
@@ -85,11 +85,13 @@ CI 在 `main` 推送时构建 → 上传 Artifacts → 发布 Release（`v*` tag
 
 | 页面 | 用途 |
 |---|---|
-| 运行状态 | 版本、运行/自启状态、配置校验、端口占用提示；启停/重启 |
-| 内核管理 | 选渠道或填指定版本安装（后台任务 + 实时进度 + 断点续传）；激活/删除/回滚 |
-| 配置管理 | 分片文件在线编辑或上传；校验并保存（失败回退）；快照与恢复 |
-| 日志 | syslog 中的内核日志 |
-| 面板 | 官方 dashboard / Clash API 开关、监听地址与密钥、面板下载源 |
+| 运行状态 | 版本、运行/自启、配置校验、端口占用提示（状态每 5 秒自刷新）；启停/重启按钮即时生效 |
+| 内核管理 | 渠道/指定版本/加速前缀（随「保存并应用」生效）；「检查更新」显示各分支最新版；安装走后台任务（实时进度 + 断点续传）；激活/删除/回滚 |
+| 配置管理 | 分片文件在线编辑或上传；校验并保存（失败自动回退）；快照与恢复 |
+| 日志 | syslog 中的内核日志，可开关自动刷新 |
+| 面板 | 官方 dashboard / Clash API 开关、端口、访问密钥、面板下载源 |
+
+设置类页面均遵循 OpenWrt 标准的 **保存并应用 / 保存 / 复位** 生效方式（与 nikki 一致）；服务操作类按钮即时执行。
 
 首次使用：装内核 → 上传配置 → 勾选开机自启并启动 → 面板页保存并打开 `/dashboard/`。
 
@@ -111,6 +113,7 @@ CI 在 `main` 推送时构建 → 上传 Artifacts → 发布 Release（`v*` tag
 
 - sing-box **1.14+** 内置 `api` 服务：开启 dashboard 后内核自动下载官方面板（`gh-pages` zip）并在 `/dashboard/` 托管，默认每天检查更新——因此本项目不打包任何前端。
 - **必须显式声明 HTTP client**：1.14 起「隐式默认客户端」已弃用且会 FATAL；面板分片自带 `http_clients`（tag `isongwrt-dashboard`），只给 dashboard 使用，不覆盖你的 `route.default_http_client`。
+- **默认局域网可访问**：监听地址固定 `0.0.0.0`，**访问密钥在安装时自动生成**（面板页可一键重新生成），浏览器首次打开面板时填该密钥即可。
 - **端口冲突**：`api_port` 默认 `9090` 与 mihomo/nikki 的 Clash API 相同，同机部署请改（如 `9095`），否则启动失败（状态页会提示）。
 - **下载慢/失败**：可换面板资源下载源，或手工把面板文件放进 `<work_dir>/dashboard/`（非空且无 `.etag` 时按原样提供、不自动更新）。
 - 用 Clash 协议面板（zashboard/metacubexd）：开启 Clash API，面板指向 `<路由器>:<clash_port>`。
@@ -136,7 +139,8 @@ config isongwrt 'main'
 	option work_dir '/etc/isongwrt'
 	option channel 'stable'         # stable | rc | beta | alpha
 	option github_proxy ''          # GitHub 加速前缀（可选）
-	option api_listen '127.0.0.1'   # 0.0.0.0 = 局域网可访问面板
+	option api_listen '0.0.0.0'     # 固定允许局域网访问面板
+	option pin_version ''           # 内核指定版本（留空 = 渠道最新）
 	option api_port '9090'
 	option api_secret ''
 	option dashboard '1'

@@ -1,6 +1,8 @@
 #!/bin/sh
 # isongwrt —— sing-box 内核管理与配置控制后端（LuCI 前端通过 fs.exec 调用）
-# 依赖：OpenWrt 基础组件（uci / curl / tar / busybox）+ 可选 logread
+# 依赖：OpenWrt 基础组件（uci / tar / busybox；下载走 curl 或系统自带 uclient-fetch/wget）
+# 内核来源：一律取自官方 Releases（SagerNet/sing-box），按架构自动匹配并优先 musl 构建；
+#          本项目不编译内核（CI 只构建 LuCI 包）。
 # 用法：ctl <status|channels|releases|installed|install|rollback|remove|config-*> ...
 set -u
 
@@ -334,9 +336,25 @@ do_config_list() {
 	printf ']}\n'
 }
 
+do_api_secret_new() {
+	_new=$(head -c 32 /dev/urandom | md5sum | cut -c1-24)
+	if uci -q set isongwrt.main.api_secret="$_new" && uci -q commit isongwrt; then
+		ok ",\"secret\":\"$_new\""
+	else
+		die "写入 UCI 失败"
+	fi
+}
+
 # ---------- API / 面板托管（独立分片文件，避免改动用户配置） ----------
 do_api_sync() {
 	init_dirs
+	# 访问密钥：默认自动生成并写回 UCI（仅首次；之后可在面板页重新生成）
+	if [ -z "$API_SECRET" ]; then
+		API_SECRET=$(head -c 32 /dev/urandom | md5sum | cut -c1-24)
+		uci -q set isongwrt.main.api_secret="$API_SECRET" >/dev/null 2>&1 && uci -q commit isongwrt >/dev/null 2>&1
+		printf '[api-sync] 已自动生成访问密钥\n' >&2
+	fi
+	[ -n "$API_LISTEN" ] || API_LISTEN=0.0.0.0
 	_f="$CONF_DIR/90-isongwrt-api.json"
 	if [ "$DASHBOARD" != 1 ] && [ "$CLASH_API" != 1 ]; then
 		rm -f "$_f"
@@ -387,7 +405,7 @@ do_status() {
 	_ver=""
 	[ -x "$CORE_PATH" ] && _ver=$("$CORE_PATH" version 2>/dev/null | head -1 | awk '{print $3}')
 	_enabled=false
-	ls /etc/rc.d/S*isongwrt >/dev/null 2>&1 && _enabled=true
+	[ "$(cfgd enabled 0)" = "1" ] && _enabled=true
 	_chk=ok
 	CONF_CHECK >/dev/null 2>&1 || _chk=fail
 	_nfiles=$(ls "$CONF_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')
@@ -428,6 +446,10 @@ do_log() {
 }
 
 do_channels() {
+	# force = 忽略本地缓存，强制重新拉取（“检查更新”按钮）
+	if [ "${1:-}" = "force" ]; then
+		rm -f "$CACHE_DIR/releases.atom" "$CACHE_DIR/releases.json"
+	fi
 	if ! fetch_releases >/dev/null 2>&1; then
 		die "无法获取版本列表（GitHub 不可达或被限速，可在「内核管理」页填写加速前缀）"
 	fi
@@ -444,7 +466,7 @@ do_channels() {
 
 case "${1:-status}" in
 	status)      do_status ;;
-	channels)    do_channels ;;
+	channels)    do_channels "${2:-}" ;;
 	releases)    { printf '{"ok":true,"channel":"%s","releases":[' "${2:-stable}"; _f=1
 	              for _r in $(channel_list "${2:-stable}" "${3:-12}"); do
 	                [ "$_f" = 1 ] || printf ','; _f=0; printf '"%s"' "$_r"
@@ -462,6 +484,7 @@ case "${1:-status}" in
 	config-restore) do_config_restore "${2:?}" ;;
 	config-backup)  mkdir -p "$BACKUP_DIR"; _d="$BACKUP_DIR/snapshot-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$_d"; cp "$CONF_DIR"/*.json "$_d/" 2>/dev/null; ok ",\"snapshot\":\"$(json_esc "$_d")\"" ;;
 	api-sync)    do_api_sync ;;
+	api-secret-new) do_api_secret_new ;;
 	check)       if _e=$(CONF_CHECK 2>&1); then ok; else die "$(printf '%s' "$_e" | tail -3 | tr '\n' ' ')"; fi ;;
 	log)         do_log "${2:-200}" ;;
 	service)     case "${2:-}" in

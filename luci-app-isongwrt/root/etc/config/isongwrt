@@ -8,8 +8,11 @@ config isongwrt 'main'
 	option channel 'stable'
 	# GitHub 加速前缀（可选，例：https://ghfast.top/）
 	option github_proxy ''
+	# 内核版本（留空 = 渠道最新；也可填精确 tag）
+	option pin_version ''
 	# API 服务与官方面板（sing-box 1.14+；面板经 /dashboard/ 自动下载托管）
-	option api_listen '127.0.0.1'
+	# 监听地址固定 0.0.0.0（允许局域网访问面板）；访问密钥由安装脚本自动生成
+	option api_listen '0.0.0.0'
 	option api_port '9090'
 	option api_secret ''
 	option dashboard '1'

@@ -22,5 +22,15 @@ if ! ls /etc/isongwrt/conf/*.json >/dev/null 2>&1; then
 SAMPLE
 fi
 
+# 默认访问密钥（面板与 API 用；可在面板页重新生成）
+if [ -z "$(uci -q get isongwrt.main.api_secret)" ]; then
+	uci set isongwrt.main.api_secret="$(head -c 32 /dev/urandom | md5sum | cut -c1-24)"
+	uci commit isongwrt
+fi
+
+# 建立开机启动链接：实际是否随系统启动由 UCI 的 enabled 决定（见 init 脚本）
+/etc/init.d/isongwrt enable 2>/dev/null
+
+# 依据当前 UCI 生成 API/面板分片
 /usr/lib/isongwrt/ctl api-sync >/dev/null 2>&1
 exit 0
