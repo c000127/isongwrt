@@ -48,7 +48,10 @@ jobs:
           #  - 25.12（apk）：SDK 侧 apk 签名构建目前失败（luci-base/lua host-compile 报错），
           #    故暂不传 PRIVATE_KEY → 索引未签名，客户端用 --allow-untrusted（脚本已自动处理）
           KEY_BUILD: ${{ matrix.branch == 'openwrt-24.10' && secrets.KEY_BUILD || '' }}
-          PRIVATE_KEY: ${{ matrix.branch == 'openwrt-25.12' && secrets.PRIVATE_KEY || '' }}
+          # apk 签名（PRIVATE_KEY）暂不启用：SDK 侧 25.12 带签名构建会失败
+          # （luci-base/lua host-compile 报错，疑与 CONFIG_SIGNED_PACKAGES 下的构建差异有关）。
+          # 因此 25.12 的索引未签名，客户端由 feed.sh/install.sh 自动加 --allow-untrusted。
+          # PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           NO_REFRESH_CHECK: true
 
       - name: stage-feed
