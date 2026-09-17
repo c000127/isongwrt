@@ -23,24 +23,55 @@ OpenWrt / iStoreOS 上的 **sing-box 轻量管理面板**（LuCI 应用）。
 
 ## 安装
 
-### 方式一：Releases 安装包（推荐）
+### A. Install From Feed（推荐）
 
-从本仓库 [Releases](../../releases) 或 CI Artifacts 下载对应架构与分支的包：
+一键安装（自动识别 `24.10 / 25.12` 与架构，添加 feed 并安装；feed 不可达时自动回退 Releases）：
+
+```sh
+wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/install.sh | sh
+```
+
+也可以分两步，自己控制：
+
+```sh
+# 1) 添加 feed（可重复执行，会覆盖旧的同源配置）
+wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/feed.sh | sh
+
+# 2) 安装 / 升级
+opkg install luci-app-isongwrt            # OpenWrt 24.10 (opkg)
+apk add luci-app-isongwrt                 # OpenWrt 25.x (apk)
+#  未签名 feed 时 apk 需加 --allow-untrusted（脚本已自动处理）
+```
+
+feed 地址（`feed` 分支，由 CI 自动发布）：
+
+```
+https://raw.githubusercontent.com/c000127/isongwrt/feed/<branch>/<arch>/isongwrt
+例：.../feed/openwrt-25.12/x86_64/isongwrt/packages.adb
+```
+
+- 国内访问 raw.githubusercontent 慢时，脚本会自动改用 jsDelivr 镜像
+  （`https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed/...`）；也可用 `ISONGWRT_FEED_BASE` 指定自建镜像。
+- **签名状态**：默认未签名（apk 侧自动加 `--allow-untrusted`）。
+  若你配置了仓库 secrets `KEY_BUILD`（usign，签 ipk）与 `PRIVATE_KEY`（PEM，签 apk），
+  CI 会自动签名并发布公钥，`feed.sh` 会自动导入公钥，之后无需 `--allow-untrusted`。
+
+### B. 从 Releases 下载安装
+
+从 [Releases](../../releases) 下载对应包（滚动 `latest` 预发布始终是最新构建）：
 
 ```sh
 # OpenWrt 24.10 (opkg)
-opkg install luci-app-isongwrt_*.ipk
+opkg install luci-app-isongwrt_*_all.ipk
 
 # OpenWrt 25.x (apk)
 apk add --allow-untrusted luci-app-isongwrt-*.apk
-
-# 依赖（若未装）
-opkg install curl ca-bundle        # 或 apk add curl ca-bundle
 ```
 
-安装后刷新 LuCI（`/etc/init.d/uhttpd restart` 或清理浏览器缓存），菜单出现在 **服务 → isongwrt**。
+依赖（若未装）：`opkg install curl ca-bundle` / `apk add curl ca-bundle`。
+安装后刷新 LuCI（`/etc/init.d/uhttpd restart`），菜单出现在 **服务 → isongwrt**。
 
-### 方式二：自建 feed 编译
+### C. 自行编译
 
 ```sh
 # 在 OpenWrt SDK / buildroot 中
@@ -50,11 +81,10 @@ make menuconfig   # LuCI → Applications → luci-app-isongwrt
 make package/luci-app-isongwrt/compile V=s
 ```
 
-### 方式三：GitHub Actions 自动构建
-
-`.github/workflows/build.yml` 默认只构建**当前需要的目标**：`x86_64` × {`openwrt-24.10`(ipk), `openwrt-25.12`(apk)}，
-推送到 `main` 或手动 `workflow_dispatch` 触发，产物在 Actions Artifacts 中。
-需要其它架构/分支（如 `aarch64_cortex-a53`、`SNAPSHOT`）时，往矩阵的 `arch` / `branch` 列表里加一行即可。
+CI（`.github/workflows/build.yml`）在 `main` 推送与手动触发时构建，并自动：
+① 上传 Actions Artifacts；② 发布 **Release**（打 `v*` tag = 正式版，否则更新滚动 `latest`）；
+③ 发布 **`feed` 分支**（含索引，供上面 A 方式直接安装）。
+默认只构建 **`x86_64` × {`openwrt-24.10`, `openwrt-25.12`}**；需要其它架构/分支时在矩阵里加一行即可。
 
 ## 使用
 
