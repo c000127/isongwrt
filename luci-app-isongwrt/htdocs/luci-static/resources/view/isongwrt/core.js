@@ -1,115 +1,87 @@
 'use strict';
 'require view';
 'require form';
-'require dom';
 'require ui';
 'require tools.isongwrt as iso';
 
 var CHANNELS = [ 'stable', 'rc', 'beta', 'alpha' ];
 
+function btn(label, style, fn) {
+	return E('button', { 'class': 'btn cbi-button cbi-button-' + style, 'click': fn }, label);
+}
+
 return view.extend({
 	load: function () {
-		return Promise.all([ iso.call(['installed']), iso.call(['status']) ]);
+		return iso.call(['installed']);
 	},
 
-	render: function (data) {
+	render: function (inst) {
 		var m, s, o, self = this;
-
-		self.installed = data[0] || {};
-		self.status = data[1] || {};
+		self.installed = inst || {};
 		self.channels = null;
 
-		/* ---------- 表格渲染 ---------- */
-		function channelTable(list) {
-			var trs = [ E('tr', { 'class': 'tr table-titles' }, [
-				E('th', { 'class': 'th' }, '渠道'),
-				E('th', { 'class': 'th' }, '最新版本'),
-				E('th', { 'class': 'th' }, '状态')
-			]) ];
-			list.forEach(function (c) {
-				var isCurrent = c.latest && self.installed.active === c.latest.replace(/^v/, '');
-				trs.push(E('tr', { 'class': 'tr' }, [
-					E('td', { 'class': 'td left' }, c.name),
-					E('td', { 'class': 'td left' }, c.latest || E('em', {}, '（该渠道近期无版本）')),
-					E('td', { 'class': 'td left' }, isCurrent ? E('span', { 'style': 'color:green' }, '已是最新') : '')
-				]));
-			});
-			return E('table', { 'class': 'table' }, trs);
+		function latestLine() {
+			if (!self.channels)
+				return E('span', { 'class': 'cbi-value-description' }, '未检查（点「检查更新」获取官方 Releases 最新版）');
+			return E('div', {}, self.channels.map(function (c, i) {
+				return [ i ? ' · ' : '', E('strong', {}, c.name), ' ', c.latest || '—' ];
+			}).reduce(function (a, b) { return a.concat(b); }, []));
 		}
 
-		function installedTable(inst) {
-			var versions = inst.versions || [];
-			var trs = [ E('tr', { 'class': 'tr table-titles' }, [
-				E('th', { 'class': 'th' }, '版本'),
-				E('th', { 'class': 'th' }, '大小'),
-				E('th', { 'class': 'th' }, 'SHA256'),
-				E('th', { 'class': 'th' }, '操作')
-			]) ];
+		function installedTable() {
+			var versions = (self.installed.versions || []);
 			if (!versions.length)
-				trs.push(E('tr', { 'class': 'tr' }, [ E('td', { 'class': 'td', 'colspan': 4 }, '尚未安装任何内核') ]));
-			versions.forEach(function (v) {
-				var isActive = v.version === inst.active;
-				trs.push(E('tr', { 'class': 'tr' }, [
+				return E('em', {}, '尚未安装');
+			var trs = versions.map(function (v) {
+				var isActive = v.version === self.installed.active;
+				return E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left' }, v.version + (isActive ? ' ★' : '')),
 					E('td', { 'class': 'td left' }, v.size ? (Math.round(v.size / 1048576 * 10) / 10) + ' MiB' : '-'),
-					E('td', { 'class': 'td left' }, (v.sha256 || '').substr(0, 16)),
-					E('td', { 'class': 'td left' }, [
-						isActive ? E('em', {}, '当前激活') : E('button', {
-							'class': 'btn cbi-button cbi-button-apply',
-							'click': function () {
-								return iso.busy(iso.call(['activate', v.version]), '切换内核…').then(function (r) {
-									iso.notify(r, '已切换到 ' + v.version);
-									return reloadInstalled();
-								});
-							}
-						}, '激活'),
+					E('td', { 'class': 'td left' }, isActive ? E('em', {}, '当前') : [
+						btn('激活', 'apply', function () {
+							return iso.busy(iso.call(['activate', v.version]), '切换内核…').then(function (r) {
+								iso.notify(r, '已切换到 ' + v.version);
+								return reload();
+							});
+						}),
 						' ',
-						isActive ? '' : E('button', {
-							'class': 'btn cbi-button cbi-button-remove',
-							'click': function () {
-								return iso.busy(iso.call(['remove', v.version]), '删除…').then(function (r) {
-									iso.notify(r, '已删除 ' + v.version);
-									return reloadInstalled();
-								});
-							}
-						}, '删除')
+						btn('删除', 'remove', function () {
+							return iso.busy(iso.call(['remove', v.version]), '删除…').then(function (r) {
+								iso.notify(r, '已删除 ' + v.version);
+								return reload();
+							});
+						})
 					])
-				]));
+				]);
 			});
 			return E('table', { 'class': 'table' }, trs);
 		}
 
-		function reloadInstalled() {
-			return iso.call(['installed']).then(function (inst) {
-				self.installed = inst || {};
-				var el = document.getElementById('iso-installed');
-				if (el) dom.content(el, installedTable(self.installed));
-				if (self.channels) {
-					var ce = document.getElementById('iso-channels');
-					if (ce) dom.content(ce, channelTable(self.channels));
-				}
+		function reload() {
+			return iso.call(['installed']).then(function (r) {
+				self.installed = r || {};
+				return m.reset();
 			});
 		}
 
-		/* ---------- 动作 ---------- */
 		function checkUpdates() {
 			return iso.busy(iso.call(['channels', 'force']), '正在检查官方 Releases…').then(function (r) {
-				if (!r || !r.ok) { iso.notify(r, ''); return; }
-				self.channels = r.channels || [];
-				var el = document.getElementById('iso-channels');
-				if (el) dom.content(el, channelTable(self.channels));
-				iso.notify({ ok: true }, '已获取各分支最新版本');
+				if (r && r.ok) {
+					self.channels = r.channels || [];
+					return m.reset();
+				}
+				iso.notify(r, '');
 			});
 		}
 
 		function install() {
 			var ch = iso.get('channel', 'stable');
 			var pin = (iso.get('pin_version', '') || '').trim();
-			var label = pin ? ('安装 ' + pin) : ('安装 ' + ch + ' 渠道最新版');
+			var label = pin || (ch + ' 渠道最新版');
 			var pre = E('pre', {
 				'style': 'max-height:40vh;overflow:auto;white-space:pre-wrap;font-size:12px;background:#111;color:#ddd;padding:8px'
 			}, '正在启动安装任务…');
-			ui.showModal(label, [ pre, E('div', { 'class': 'right' }, [
+			ui.showModal('安装 ' + label, [ pre, E('div', { 'class': 'right' }, [
 				E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭')
 			]) ]);
 
@@ -121,13 +93,14 @@ return view.extend({
 					pre.scrollTop = pre.scrollHeight;
 					if (!r || r.state === 'done') {
 						stop();
-						iso.notify({ ok: true }, label + ' 完成');
-						return reloadInstalled();
+						ui.hideModal();
+						iso.notify({ ok: true }, '安装完成');
+						return reload();
 					}
 					if (r.state === 'failed') {
 						stop();
-						iso.notify({ ok: false, error: '安装失败，详见日志' }, '');
-						return reloadInstalled();
+						iso.notify({ ok: false, error: '安装失败，详见进度窗口日志' }, '');
+						return reload();
 					}
 				});
 			}
@@ -139,60 +112,45 @@ return view.extend({
 			});
 		}
 
-		function rollback() {
-			return iso.busy(iso.call(['rollback']), '回滚内核…').then(function (r) {
-				iso.notify(r, '已回滚');
-				return reloadInstalled();
-			});
-		}
-
-		/* ---------- 表单 ---------- */
 		m = new form.Map('isongwrt', '内核管理',
-			'内核一律取自官方 Releases（SagerNet/sing-box），按本机架构自动匹配并优先 musl 构建；' +
-			'本项目不编译内核。下方设置改动后请先「保存并应用」，再执行安装等操作。');
+			'内核取自官方 Releases（SagerNet/sing-box），按本机架构自动匹配、优先 musl 构建；本项目不编译内核。设置改动请先「保存并应用」。');
 
-		s = m.section(form.NamedSection, 'main', 'isongwrt', '安装设置');
+		s = m.section(form.NamedSection, 'main', 'isongwrt', '安装');
 		s.anonymous = true;
 
 		o = s.option(form.ListValue, 'channel', '渠道');
 		CHANNELS.forEach(function (c) { o.value(c, c); });
 		o.default = 'stable';
 
-		o = s.option(form.Value, 'pin_version', '指定版本（可选）',
-			'留空 = 安装所选渠道的最新版；也可填精确 tag，例如 v1.15.0-alpha.5。');
+		o = s.option(form.Value, 'pin_version', '指定版本',
+			'留空 = 渠道最新；也可填精确 tag，如 v1.15.0-alpha.5。');
 
-		o = s.option(form.Value, 'github_proxy', 'GitHub 加速前缀',
-			'留空 = 直连 github.com；网络受限时可填加速前缀，例如 https://ghfast.top/');
+		o = s.option(form.Value, 'github_proxy', '加速前缀',
+			'留空 = 直连 github.com；受限网络可填如 https://ghfast.top/');
 
-		o = s.option(form.Button, 'check');
-		o.inputstyle = 'action';
-		o.inputtitle = '检查更新';
-		o.onclick = checkUpdates;
+		o = s.option(form.DummyValue, '_latest', '最新版本');
+		o.cfgvalue = function () { return latestLine(); };
 
-		o = s.option(form.Button, 'install');
-		o.inputstyle = 'apply';
-		o.inputtitle = '安装 / 升级';
-		o.onclick = install;
-
-		o = s.option(form.Button, 'rollback');
-		o.inputstyle = 'reset';
-		o.inputtitle = '回滚到上一版本';
-		o.onclick = rollback;
-
-		s = m.section(form.TableSection, 'available', '各分支最新版本');
-		s.anonymous = true;
-		o = s.option(form.DummyValue, '_channels');
+		o = s.option(form.DummyValue, '_actions', '操作');
 		o.cfgvalue = function () {
-			return E('div', { 'id': 'iso-channels' },
-				self.channels ? channelTable(self.channels) : E('em', {}, '点击上方「检查更新」从官方 Releases 获取'));
+			return E('div', {}, [
+				btn('检查更新', 'action', checkUpdates),
+				' ',
+				btn('安装 / 升级', 'apply', install),
+				' ',
+				btn('回滚', 'reset', function () {
+					return iso.busy(iso.call(['rollback']), '回滚内核…').then(function (r) {
+						iso.notify(r, '已回滚');
+						return reload();
+					});
+				})
+			]);
 		};
 
 		s = m.section(form.TableSection, 'installed', '已安装版本');
 		s.anonymous = true;
 		o = s.option(form.DummyValue, '_installed');
-		o.cfgvalue = function () {
-			return E('div', { 'id': 'iso-installed' }, installedTable(self.installed));
-		};
+		o.cfgvalue = function () { return installedTable(); };
 
 		return m.render();
 	}

@@ -1,38 +1,11 @@
 'use strict';
 'require view';
 'require form';
-'require dom';
 'require poll';
-'require ui';
 'require tools.isongwrt as iso';
 
-function row(k, v) {
-	return E('tr', { 'class': 'tr' }, [
-		E('td', { 'class': 'td left', 'width': '33%' }, E('strong', {}, k)),
-		E('td', { 'class': 'td left' }, v)
-	]);
-}
-
-function statusTable(st) {
-	st = st || {};
-	var rows = [
-		row('运行状态', st.running
-			? E('span', { 'style': 'color:green' }, '运行中 (PID ' + (st.pid || '?') + ')')
-			: E('span', { 'style': 'color:red' }, '已停止')),
-		row('内核版本', st.version || E('em', {}, '未安装（请到「内核管理」安装）')),
-		row('激活版本', st.active || '-'),
-		row('渠道 / 架构', (st.channel || '-') + ' / ' + (st.arch || '-')),
-		row('内核路径', st.core_path || '-'),
-		row('配置目录', (st.conf_dir || '-') + '（' + (st.conf_files || 0) + ' 个分片文件）'),
-		row('配置校验', st.config_check === 'ok'
-			? E('span', { 'style': 'color:green' }, '通过')
-			: E('span', { 'style': 'color:red' }, '未通过（见「日志」页）')),
-		row('API / 面板', (st.api || '-') + (st.dashboard ? '（官方 dashboard 已启用）' : ''))
-	];
-	if (st.api_port_busy)
-		rows.push(row('提示', E('span', { 'style': 'color:#c60' },
-			'API 端口被占用：请到「面板」页改用其它端口，否则内核无法启动')));
-	return E('table', { 'class': 'table' }, rows);
+function btn(label, style, fn) {
+	return E('button', { 'class': 'btn cbi-button cbi-button-' + style, 'click': fn }, label);
 }
 
 return view.extend({
@@ -42,60 +15,77 @@ return view.extend({
 
 	render: function (status) {
 		var m, s, o, self = this;
+		self.status = status || {};
 
-		function refreshStatus() {
-			return iso.call(['status']).then(function (st) {
-				self.status = st || {};
-				var el = document.getElementById('iso-status');
-				if (el)
-					dom.content(el, statusTable(self.status));
-			});
+		function signature(st) {
+			return [ st.running, st.pid, st.version, st.config_check, st.api, st.api_port_busy, st.enabled ].join('|');
 		}
+		var lastSig = signature(self.status);
 
-		function action(args, label) {
+		function act(args, label) {
 			return iso.busy(iso.call(args), label + '…').then(function (r) {
 				iso.notify(r, label + ' 完成');
-				return refreshStatus();
+				return iso.call(['status']).then(function (st) {
+					self.status = st || {};
+					lastSig = signature(self.status);
+					return m.reset();
+				});
 			});
 		}
 
-		this.status = status || {};
+		function statusLine() {
+			var st = self.status || {};
+			var parts = [];
+			parts.push(st.running
+				? E('span', { 'style': 'color:green' }, '运行中')
+				: E('span', { 'style': 'color:red' }, '已停止'));
+			if (st.running)
+				parts.push('PID ' + (st.pid || '?'));
+			parts.push(st.version ? ('v' + String(st.version).replace(/^v/, '')) : '未安装内核');
+			parts.push(st.config_check === 'ok' ? '配置校验通过' : '配置校验未通过');
+			var lines = [ E('div', {}, parts.map(function (p, i) { return [ i ? ' · ' : '', p ]; }).reduce(function (a, b) { return a.concat(b); }, [])) ];
+			lines.push(E('div', { 'class': 'cbi-value-description' },
+				'API ' + (st.api || '-') + (st.dashboard ? '，官方面板已启用' : '')));
+			if (st.api_port_busy)
+				lines.push(E('div', { 'style': 'color:#c60' }, '⚠ API 端口被占用，请到「面板」页改用其它端口'));
+			return E('div', {}, lines);
+		}
 
-		m = new form.Map('isongwrt', 'isongwrt 运行状态',
-			'sing-box 内核管理与配置面板。设置项修改后点「保存并应用」生效；服务操作按钮立即执行。');
+		m = new form.Map('isongwrt', 'isongwrt',
+			'sing-box 内核管理与配置面板。');
 
-		/* ---- 状态（只读，5 秒自动刷新） ---- */
 		s = m.section(form.TableSection, 'status', '状态');
 		s.anonymous = true;
 
-		o = s.option(form.DummyValue, '_status');
+		o = s.option(form.DummyValue, '_status', '当前状态');
+		o.cfgvalue = function () { return statusLine(); };
+
+		o = s.option(form.DummyValue, '_actions', '服务操作');
 		o.cfgvalue = function () {
-			return E('div', { 'id': 'iso-status' }, statusTable(self.status));
+			return E('div', {}, [
+				btn('启动', 'apply', function () { return act(['service', 'start'], '启动服务'); }),
+				' ',
+				btn('停止', 'reset', function () { return act(['service', 'stop'], '停止服务'); }),
+				' ',
+				btn('重启', 'action', function () { return act(['service', 'restart'], '重启服务'); })
+			]);
 		};
 
-		o = s.option(form.Button, 'start');
-		o.inputstyle = 'apply';
-		o.inputtitle = '启动';
-		o.onclick = function () { return action(['service', 'start'], '启动服务'); };
-
-		o = s.option(form.Button, 'stop');
-		o.inputstyle = 'reset';
-		o.inputtitle = '停止';
-		o.onclick = function () { return action(['service', 'stop'], '停止服务'); };
-
-		o = s.option(form.Button, 'restart');
-		o.inputstyle = 'action';
-		o.inputtitle = '重启';
-		o.onclick = function () { return action(['service', 'restart'], '重启服务'); };
-
-		/* ---- 设置（UCI，随「保存并应用」生效） ---- */
-		s = m.section(form.NamedSection, 'main', 'isongwrt', '服务设置');
+		s = m.section(form.NamedSection, 'main', 'isongwrt', '设置');
 		s.anonymous = true;
+		o = s.option(form.Flag, 'enabled', '开机自启', '随系统启动并自动拉起。');
 
-		o = s.option(form.Flag, 'enabled', '开机自启',
-			'随系统启动并自动拉起（procd）；关闭后开机不启动，可用上方按钮手动启动。');
-
-		poll.add(refreshStatus, 5);
+		poll.add(function () {
+			return iso.call(['status']).then(function (st) {
+				st = st || {};
+				var sig = signature(st);
+				if (sig !== lastSig) {
+					lastSig = sig;
+					self.status = st;
+					return m.reset();
+				}
+			});
+		}, 5);
 
 		return m.render();
 	}
