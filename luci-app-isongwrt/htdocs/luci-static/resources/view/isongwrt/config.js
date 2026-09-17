@@ -36,7 +36,9 @@ return view.extend({
 
 		self.editor = E('textarea', {
 			'class': 'cbi-input-textarea',
-			'style': 'width:100%;height:340px;font-family:monospace;box-sizing:border-box',
+			'rows': '24',
+			'style': 'width:100%;min-height:420px;height:62vh;font-family:monospace;' +
+				'font-size:13px;line-height:1.45;box-sizing:border-box;resize:vertical',
 			'spellcheck': 'false',
 			'input': function (ev) { self.content = ev.target.value; }
 		}, '');
@@ -111,8 +113,9 @@ return view.extend({
 						'change': function (ev) { return self.upload(ev); }
 					})
 				])),
-				row('内容', self.editor)
 			]),
+
+			E('div', { 'class': 'cbi-section' }, [ self.editor ]),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '备份（最近 10 条）'),
