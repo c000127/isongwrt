@@ -19,6 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # 串行执行：两个分支并发出镜像/SDK 缓存争用（日志可见 "Unable to reserve cache"），
+      # 会造成 host-compile 偶发失败
+      max-parallel: 1
       # 仅构建当前需要的目标：x86_64 的 24.10(ipk) 与 25.12(apk)。
       # 后续需要其它架构/分支时，在下面两行里加回来即可（例如 aarch64_cortex-a53、SNAPSHOT）。
       matrix:
