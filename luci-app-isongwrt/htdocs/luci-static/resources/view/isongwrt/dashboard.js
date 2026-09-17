@@ -38,8 +38,7 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'api_secret', '访问密钥',
-			'浏览器打开面板时填入；可用右侧按钮重新生成。');
-		o.rmempty = false;
+			'浏览器打开面板时填入；留空 = 保存并应用时自动生成（刷新本页可见），也可用右侧按钮重新生成。');
 
 		o = s.option(form.Value, 'dashboard_download_url', '面板资源地址',
 			'留空 = 官方 gh-pages zip；亦可手工放入工作目录的 dashboard/ 目录。');
@@ -71,8 +70,8 @@ return view.extend({
 		o.default = '9091';
 		o.rmempty = false;
 
-		o = s.option(form.Value, 'clash_secret', 'Clash 密钥');
-		o.rmempty = false;
+		o = s.option(form.Value, 'clash_secret', 'Clash 密钥',
+			'留空 = 不鉴权（仅建议在本机/受信网络使用）。');
 
 		return m.render();
 	}
