@@ -136,8 +136,12 @@ return view.extend({
 	save: function () {
 		var self = this;
 		var name = self.current === '__new__' ? '10-user' : self.current;
+		if (!String(self.content || '').trim()) {
+			ui.addNotification(null, E('p', {}, '内容为空：请先在上方编辑，或选择要上传的 .json 文件'), 'warning');
+			return Promise.resolve();
+		}
 		return fs.write(UPLOAD_TMP, self.content).then(function () {
-			return iso.busy(iso.call(['config-save', name]), '校验并保存…');
+			return iso.busy(iso.call(['config-save', name, UPLOAD_TMP]), '校验并保存…');
 		}).then(function (r) {
 			iso.notify(r, '已保存 ' + name + '.json');
 			self.current = name;
