@@ -82,6 +82,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 20
+
       - name: download
         uses: actions/download-artifact@v8
         with:
@@ -96,46 +101,95 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: release body
+        id: body
         run: |
-          cat > body.md <<'EOF'
-          OpenWrt / iStoreOS 的 sing-box 管理面板（LuCI）：内核分级管理（stable/rc/beta/alpha）、
-          配置上传与校验、启停控制、日志查看、官方 dashboard 一键托管。
+          PKGVER=$(grep -m1 '^PKG_VERSION:=' luci-app-isongwrt/Makefile | cut -d= -f2)
+          PKGREL=$(grep -m1 '^PKG_RELEASE:=' luci-app-isongwrt/Makefile | cut -d= -f2)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          SUBJECT=$(git log -1 --pretty=%s)
+          BUILT=$(date -u '+%Y-%m-%d %H:%M UTC')
+          COMMITS=$(git log --oneline -6 | sed 's/^/- `/; s/$/`/')
 
-          **支持**：`openwrt-24.10`（ipk/opkg）· `openwrt-25.12`（apk）· `x86_64`
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            NAME="isongwrt ${{ github.ref_name }}"
+            KIND="正式发布（tag \`${{ github.ref_name }}\`）"
+            NOTE=""
+          else
+            NAME="滚动构建（main · $(date -u +%Y-%m-%d)）"
+            KIND="滚动构建（main 分支自动构建）"
+            NOTE="> ⚠️ 本页为 **滚动构建**，仅供测试与快速取用；正式版见 \`v*\` 标签。"
+          fi
 
-          ### 安装
+          cat > body.md <<'TPL'
+          OpenWrt / iStoreOS 上的 **sing-box 管理面板**（LuCI）：内核分级管理 · 配置上传校验 · 启停控制 · 日志 · 官方 dashboard 一键托管。
+
+          __NOTE__
+
+          | 项目 | 值 |
+          |---|---|
+          | 版本 | `__VER__` |
+          | 类型 | __KIND__ |
+          | 提交 | `__SHA__` __SUBJECT__ |
+          | 构建时间 | __BUILT__ |
+          | 支持平台 | `openwrt-24.10`（ipk/opkg）· `openwrt-25.12`（apk）· `x86_64` |
+
+          ## 安装
+
+          **方式一：一键（推荐）** — 自动识别版本/架构、添加 feed（含签名公钥）并安装
 
           ```sh
-          # 推荐：一键（自动添加 feed 并安装；可选 --source=mirror|direct|custom）
           wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
-
-          # 或直接安装本页附件
-          opkg install luci-app-isongwrt_*_all.ipk              # 24.10
-          apk add luci-app-isongwrt-*.apk                       # 25.x
           ```
 
-          ### 附件说明
+          **方式二：安装本页附件**
 
-          | 文件 | 用途 |
+          ```sh
+          opkg install luci-app-isongwrt_*_all.ipk     # OpenWrt 24.10
+          apk add luci-app-isongwrt-*.apk              # OpenWrt 25.12
+          ```
+
+          ## 附件
+
+          | 文件 | 适用 |
           |---|---|
           | `luci-app-isongwrt_*_all.ipk` | OpenWrt 24.10 / opkg |
           | `luci-app-isongwrt-*.apk` | OpenWrt 25.12 / apk |
           | `isongwrt_x86_64-*.tar.gz` | 完整包目录（含 feed 索引） |
           | `SHA256SUMS.txt` | 校验和 |
 
-          安装后菜单：**服务 → isongwrt**
-          EOF
-          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" != "true" ]; then
-            printf '\n> 本页为 **main 分支滚动构建**（预发布），仅供测试；正式版见 `v*` 标签。\n' >> body.md
-          fi
+          ## 说明
+
+          - **内核不随本包发布**：面板「内核管理」从官方 [SagerNet/sing-box](https://github.com/SagerNet/sing-box/releases) 按架构自动下载（优先 musl），支持 stable / rc / beta / alpha 与指定版本。
+          - **feed**：`https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed` —— ipk 索引已用 usign 签名（公钥随 feed 发布），apk 索引未签名（安装脚本自动加 `--allow-untrusted`）。
+          - 安装后菜单：**服务 → isongwrt**；面板入口 `http://<路由器>:<api_port>/dashboard/`。
+
+          ## 本次提交
+
+          __COMMITS__
+          TPL
+
+          sed -i -e "s|__VER__|${PKGVER}-r${PKGREL}|" \
+                 -e "s|__KIND__|${KIND}|" \
+                 -e "s|__SHA__|${SHORT_SHA}|" \
+                 -e "s|__SUBJECT__|${SUBJECT}|" \
+                 -e "s|__BUILT__|${BUILT}|" \
+                 -e "s|__NOTE__|${NOTE}|" body.md
+          # 多行提交列表单独替换
+          printf '%s\n' "$COMMITS" > commits.txt
+          python3 - <<'PY'
+          import pathlib
+          c = pathlib.Path('commits.txt').read_text().strip() or '- （无）'
+          p = pathlib.Path('body.md')
+          p.write_text(p.read_text().replace('__COMMITS__', c))
+          PY
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "--- body.md ---"; cat body.md
 
-      # 打 tag（v*）→ 正式 Release，标题带版本号
       - name: release (tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
-          name: isongwrt ${{ github.ref_name }}
+          name: ${{ steps.body.outputs.name }}
           body_path: body.md
           make_latest: true
           files: |
@@ -144,13 +198,12 @@ jobs:
             pkgs/*.tar.gz
             pkgs/SHA256SUMS.txt
 
-      # 手动触发 / main 推送 → 更新滚动 latest（预发布）
       - name: release (latest)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
-          name: 滚动最新构建（main）
+          name: ${{ steps.body.outputs.name }}
           body_path: body.md
           prerelease: true
           make_latest: false
