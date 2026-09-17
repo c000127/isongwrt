@@ -84,25 +84,63 @@ jobs:
           find . -name '*.ipk' -o -name '*.apk' | sort | xargs -r sha256sum > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      # 打 tag（v*）推送 → 发布正式 Release
+      - name: release body
+        run: |
+          cat > body.md <<'EOF'
+          OpenWrt / iStoreOS 的 sing-box 管理面板（LuCI）：内核分级管理（stable/rc/beta/alpha）、
+          配置上传与校验、启停控制、日志查看、官方 dashboard 一键托管。
+
+          **支持**：`openwrt-24.10`（ipk/opkg）· `openwrt-25.12`（apk）· `x86_64`
+
+          ### 安装
+
+          ```sh
+          # 推荐：一键（自动添加 feed 并安装，签名源自动导入公钥）
+          wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/install.sh | sh
+
+          # 或直接安装本页附件
+          opkg install luci-app-isongwrt_*_all.ipk              # 24.10
+          apk add luci-app-isongwrt-*.apk                       # 25.x
+          ```
+
+          ### 附件说明
+
+          | 文件 | 用途 |
+          |---|---|
+          | `luci-app-isongwrt_*_all.ipk` | OpenWrt 24.10 / opkg |
+          | `luci-app-isongwrt-*.apk` | OpenWrt 25.12 / apk |
+          | `isongwrt_x86_64-*.tar.gz` | 完整包目录（含 feed 索引） |
+          | `SHA256SUMS.txt` | 校验和 |
+
+          安装后菜单：**服务 → isongwrt**
+          EOF
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" != "true" ]; then
+            printf '\n> 本页为 **main 分支滚动构建**（预发布），仅供测试；正式版见 `v*` 标签。\n' >> body.md
+          fi
+          echo "--- body.md ---"; cat body.md
+
+      # 打 tag（v*）→ 正式 Release，标题带版本号
       - name: release (tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
+          name: isongwrt ${{ github.ref_name }}
+          body_path: body.md
+          make_latest: true
           files: |
             pkgs/*.ipk
             pkgs/*.apk
             pkgs/*.tar.gz
             pkgs/SHA256SUMS.txt
-          generate_release_notes: true
 
-      # 手动触发 / main 推送 → 更新滚动 latest（预发布，便于随时取最新包）
+      # 手动触发 / main 推送 → 更新滚动 latest（预发布）
       - name: release (latest)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
-          name: Latest build
+          name: 滚动最新构建（main）
+          body_path: body.md
           prerelease: true
           make_latest: false
           files: |
@@ -110,25 +148,3 @@ jobs:
             pkgs/*.apk
             pkgs/*.tar.gz
             pkgs/SHA256SUMS.txt
-
-  feed:
-    name: publish feed branch
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: download
-        uses: actions/download-artifact@v8
-        with:
-          pattern: feed_*
-          merge-multiple: true
-          path: public
-
-      - name: publish
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: feed
-          publish_dir: public
-          force_orphan: true
-          enable_jekyll: false
-          commit_message: 'feed: ${{ github.sha }}'

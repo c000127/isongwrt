@@ -49,9 +49,10 @@ for base in $FEED_BASES; do
 done
 [ -n "$feed_url" ] || { echo "错误：无法访问 feed（$FEED_BASES）" >&2; exit 1; }
 
+feed_root="${feed_url%/$branch/$arch/isongwrt}"
 if [ -x /bin/opkg ]; then
 	# 公钥（若 feed 提供签名）
-	if fetch "${feed_url%/isongwrt}/../key-build.pub" /tmp/key-build.pub 2>/dev/null; then
+	if fetch "$feed_root/key-build.pub" /tmp/key-build.pub 2>/dev/null; then
 		opkg-key add /tmp/key-build.pub 2>/dev/null || true
 		rm -f /tmp/key-build.pub
 	fi
@@ -60,9 +61,7 @@ if [ -x /bin/opkg ]; then
 	echo "已添加 feed：$feed_url"
 	opkg update
 else
-	base_root="${feed_url%/isongwrt}"
-	base_root="${base_root%/$branch/$arch}"
-	if fetch "$base_root/public-key.pem" /etc/apk/keys/isongwrt.pem 2>/dev/null; then
+	if fetch "$feed_root/public-key.pem" /etc/apk/keys/isongwrt.pem 2>/dev/null; then
 		echo "已安装 feed 公钥 /etc/apk/keys/isongwrt.pem"
 	fi
 	mkdir -p /etc/apk/repositories.d
