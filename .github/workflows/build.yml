@@ -104,8 +104,8 @@ jobs:
           ### 安装
 
           ```sh
-          # 推荐：一键（自动添加 feed 并安装，签名源自动导入公钥）
-          wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/install.sh | sh
+          # 推荐：一键（自动添加 feed 并安装；可选 --source=mirror|direct|custom）
+          wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
 
           # 或直接安装本页附件
           opkg install luci-app-isongwrt_*_all.ipk              # 24.10
@@ -137,8 +137,8 @@ jobs:
           body_path: body.md
           make_latest: true
           files: |
-            pkgs/*.ipk
-            pkgs/*.apk
+            pkgs/**/*.ipk
+            pkgs/**/*.apk
             pkgs/*.tar.gz
             pkgs/SHA256SUMS.txt
 
@@ -153,7 +153,38 @@ jobs:
           prerelease: true
           make_latest: false
           files: |
-            pkgs/*.ipk
-            pkgs/*.apk
+            pkgs/**/*.ipk
+            pkgs/**/*.apk
             pkgs/*.tar.gz
             pkgs/SHA256SUMS.txt
+
+  feed:
+    name: publish feed branch
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: download
+        uses: actions/download-artifact@v8
+        with:
+          pattern: feed_*
+          merge-multiple: true
+          path: public
+
+      - name: public keys
+        env:
+          KEY_BUILD_PUB: ${{ secrets.KEY_BUILD_PUB }}
+          PUBLIC_KEY: ${{ secrets.PUBLIC_KEY }}
+        run: |
+          if [ -n "$KEY_BUILD_PUB" ]; then printf '%s\n' "$KEY_BUILD_PUB" > public/key-build.pub; fi
+          if [ -n "$PUBLIC_KEY" ]; then printf '%s\n' "$PUBLIC_KEY" > public/public-key.pem; fi
+          find public -maxdepth 3 -type f | sort | head -20
+
+      - name: publish
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: feed
+          publish_dir: public
+          force_orphan: true
+          enable_jekyll: false
+          commit_message: 'feed: ${{ github.sha }}'
