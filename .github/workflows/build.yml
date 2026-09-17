@@ -7,6 +7,11 @@ on:
     paths:
       - 'luci-app-isongwrt/**'
       - '.github/workflows/build.yml'
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -33,10 +38,97 @@ jobs:
           ARCH: ${{ matrix.arch }}-${{ matrix.branch }}
           FEEDNAME: isongwrt
           PACKAGES: luci-app-isongwrt
+          # INDEX=1 → 生成 feed 索引（ipk: Packages.gz / apk: packages.adb）
+          INDEX: 1
+          # 可选签名：配置对应 secrets 后 feed 自动签名（留空 = 未签名，安装时用 --allow-untrusted）
+          KEY_BUILD: ${{ secrets.KEY_BUILD }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           NO_REFRESH_CHECK: true
+
+      - name: stage-feed
+        run: |
+          mkdir -p public/${{ matrix.branch }}/${{ matrix.arch }}
+          cp -r bin/packages/${{ matrix.arch }}/isongwrt public/${{ matrix.branch }}/${{ matrix.arch }}/
+          tar -c -z -f isongwrt_${{ matrix.arch }}-${{ matrix.branch }}.tar.gz \
+            -C bin/packages/${{ matrix.arch }} isongwrt
 
       - name: upload
         uses: actions/upload-artifact@v7
         with:
           name: isongwrt_${{ matrix.arch }}-${{ matrix.branch }}
-          path: bin/packages/${{ matrix.arch }}/isongwrt
+          path: |
+            bin/packages/${{ matrix.arch }}/isongwrt
+            isongwrt_${{ matrix.arch }}-${{ matrix.branch }}.tar.gz
+
+      - name: upload-feed
+        uses: actions/upload-artifact@v7
+        with:
+          name: feed_${{ matrix.arch }}-${{ matrix.branch }}
+          path: public
+
+  release:
+    name: release packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: download
+        uses: actions/download-artifact@v8
+        with:
+          pattern: isongwrt_*
+          merge-multiple: true
+          path: pkgs
+
+      - name: checksums
+        run: |
+          cd pkgs
+          find . -name '*.ipk' -o -name '*.apk' | sort | xargs -r sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # 打 tag（v*）推送 → 发布正式 Release
+      - name: release (tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            pkgs/*.ipk
+            pkgs/*.apk
+            pkgs/*.tar.gz
+            pkgs/SHA256SUMS.txt
+          generate_release_notes: true
+
+      # 手动触发 / main 推送 → 更新滚动 latest（预发布，便于随时取最新包）
+      - name: release (latest)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          make_latest: false
+          files: |
+            pkgs/*.ipk
+            pkgs/*.apk
+            pkgs/*.tar.gz
+            pkgs/SHA256SUMS.txt
+
+  feed:
+    name: publish feed branch
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: download
+        uses: actions/download-artifact@v8
+        with:
+          pattern: feed_*
+          merge-multiple: true
+          path: public
+
+      - name: publish
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: feed
+          publish_dir: public
+          force_orphan: true
+          enable_jekyll: false
+          commit_message: 'feed: ${{ github.sha }}'
