@@ -43,6 +43,8 @@ wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh -s -
 > 说明：`raw.githubusercontent.com` 在部分网络（含国内）不可达，因此默认走 **jsDelivr CDN**
 > （自动回退 `fastly.jsdelivr.net` → GitHub 直连）。上述选择对 `feed.sh` 同样适用
 > （`--source=mirror|direct|custom`，或 `ISONGWRT_SOURCE=`）。
+> jsDelivr 对分支引用有缓存（约 12h），刚发布的包可能稍后才可拉到；急用可改用 `--source=direct`
+> 或按 commit 固定引用 `https://cdn.jsdelivr.net/gh/c000127/isongwrt@<commit>/...`。
 
 分两步自己控制：
 
