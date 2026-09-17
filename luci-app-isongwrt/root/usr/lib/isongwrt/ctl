@@ -276,12 +276,17 @@ CONF_CHECK() { # 返回 0/1，并输出错误文本
 	printf '%s' "$_out" >&2; return 1
 }
 
-do_config_save() { # <name>  内容从 stdin
-	_name="$1"; init_dirs
+do_config_save() { # <name> [file]  内容来自 file，缺省从 stdin 读取
+	_name="$1"; _src="${2:-}"; init_dirs
 	case "$_name" in */*|*..*) die "非法文件名";; esac
 	_tmp="$CACHE_DIR/upload-$$.json"
-	cat > "$_tmp" || die "读取上传内容失败"
-	[ -s "$_tmp" ] || die "内容为空"
+	if [ -n "$_src" ]; then
+		[ -f "$_src" ] || die "内容文件不存在：$_src"
+		cp "$_src" "$_tmp" || die "读取内容文件失败"
+	else
+		cat > "$_tmp" || die "读取上传内容失败"
+	fi
+	[ -s "$_tmp" ] || die "内容为空（请先在上方编辑或选择文件）"
 	_target="$CONF_DIR/${_name}.json"
 	_bak="$BACKUP_DIR/${_name}-$(date +%Y%m%d-%H%M%S).json"
 	[ -f "$_target" ] && cp "$_target" "$_bak"
@@ -480,7 +485,7 @@ case "${1:-status}" in
 	remove)      do_remove "${2:?}" ;;
 	config-list)    do_config_list ;;
 	config-get)     do_config_get "${2:?}" ;;
-	config-save)    do_config_save "${2:?}" ;;
+	config-save)    do_config_save "${2:?}" "${3:-}" ;;
 	config-restore) do_config_restore "${2:?}" ;;
 	config-backup)  mkdir -p "$BACKUP_DIR"; _d="$BACKUP_DIR/snapshot-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$_d"; cp "$CONF_DIR"/*.json "$_d/" 2>/dev/null; ok ",\"snapshot\":\"$(json_esc "$_d")\"" ;;
 	api-sync)    do_api_sync ;;
