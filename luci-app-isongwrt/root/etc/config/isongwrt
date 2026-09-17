@@ -1,0 +1,19 @@
+config isongwrt 'main'
+	option enabled '0'
+	# 内核与配置路径
+	option core_path '/usr/lib/isongwrt/sing-box'
+	option conf_dir '/etc/isongwrt/conf'
+	option work_dir '/etc/isongwrt'
+	# 内核渠道：stable | rc | beta | alpha
+	option channel 'stable'
+	# GitHub 加速前缀（可选，例：https://ghfast.top/）
+	option github_proxy ''
+	# API 服务与官方面板（sing-box 1.14+；面板经 /dashboard/ 自动下载托管）
+	option api_listen '127.0.0.1'
+	option api_port '9090'
+	option api_secret ''
+	option dashboard '1'
+	# 可选：Clash API（供 zashboard/metacubexd 等面板）
+	option clash_api '0'
+	option clash_port '9091'
+	option clash_secret ''

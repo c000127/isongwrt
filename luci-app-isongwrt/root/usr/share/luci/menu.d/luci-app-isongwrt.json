@@ -1,0 +1,38 @@
+{
+	"admin/services/isongwrt": {
+		"title": "isongwrt",
+		"order": 30,
+		"action": { "type": "firstchild" },
+		"depends": { "acl": [ "luci-app-isongwrt" ] }
+	},
+	"admin/services/isongwrt/overview": {
+		"title": "运行状态",
+		"order": 10,
+		"action": { "type": "view", "path": "isongwrt/overview" },
+		"depends": { "acl": [ "luci-app-isongwrt" ] }
+	},
+	"admin/services/isongwrt/core": {
+		"title": "内核管理",
+		"order": 20,
+		"action": { "type": "view", "path": "isongwrt/core" },
+		"depends": { "acl": [ "luci-app-isongwrt" ] }
+	},
+	"admin/services/isongwrt/config": {
+		"title": "配置管理",
+		"order": 30,
+		"action": { "type": "view", "path": "isongwrt/config" },
+		"depends": { "acl": [ "luci-app-isongwrt" ] }
+	},
+	"admin/services/isongwrt/log": {
+		"title": "日志",
+		"order": 40,
+		"action": { "type": "view", "path": "isongwrt/log" },
+		"depends": { "acl": [ "luci-app-isongwrt" ] }
+	},
+	"admin/services/isongwrt/dashboard": {
+		"title": "面板",
+		"order": 50,
+		"action": { "type": "view", "path": "isongwrt/dashboard" },
+		"depends": { "acl": [ "luci-app-isongwrt" ] }
+	}
+}

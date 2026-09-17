@@ -1,0 +1,364 @@
+#!/bin/sh
+# isongwrt —— sing-box 内核管理与配置控制后端（LuCI 前端通过 fs.exec 调用）
+# 依赖：OpenWrt 基础组件（uci / curl / tar / busybox）+ 可选 logread
+# 用法：ctl <status|channels|releases|installed|install|rollback|remove|config-*> ...
+set -u
+
+APP=isongwrt
+STATE_DIR=/etc/isongwrt
+INSTALL_DIR="$STATE_DIR/installed"
+BACKUP_DIR="$STATE_DIR/backups"
+CONF_DIR_DEFAULT="$STATE_DIR/conf"
+ACTIVE_FILE="$STATE_DIR/active"
+CACHE_DIR=/tmp/isongwrt-cache
+GH_REPO=SagerNet/sing-box
+GH_API="https://api.github.com/repos/$GH_REPO/releases"
+UA="isongwrt/0.1.0"
+
+cfg()  { uci -q get "isongwrt.main.$1" 2>/dev/null; }
+cfgd() { _v=$(cfg "$1"); [ -n "${_v:-}" ] && printf '%s' "$_v" || printf '%s' "$2"; }
+json_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g'; }
+json_ml()  { awk '{ gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); printf "%s\\n", $0 }' | sed -e 's/\\n$//'; }
+die() { printf '{"ok":false,"error":"%s"}\n' "$(json_esc "$1")"; exit 1; }
+ok()  { printf '{"ok":true%s}\n' "${1:-}"; }
+
+CORE_PATH=$(cfgd core_path /usr/lib/isongwrt/sing-box)
+CONF_DIR=$(cfgd conf_dir "$CONF_DIR_DEFAULT")
+WORK_DIR=$(cfgd work_dir "$STATE_DIR")
+CHANNEL=$(cfgd channel stable)
+GH_PROXY=$(cfgd github_proxy '')
+API_LISTEN=$(cfgd api_listen 127.0.0.1)
+API_PORT=$(cfgd api_port 9090)
+API_SECRET=$(cfgd api_secret '')
+DASHBOARD=$(cfgd dashboard 1)
+CLASH_API=$(cfgd clash_api 0)
+CLASH_PORT=$(cfgd clash_port 9091)
+CLASH_SECRET=$(cfgd clash_secret '')
+
+init_dirs() {
+	mkdir -p "$INSTALL_DIR" "$BACKUP_DIR" "$CONF_DIR" "$CACHE_DIR" "$WORK_DIR" 2>/dev/null
+}
+
+# ---------- 架构映射：OpenWrt DISTRIB_ARCH → sing-box linux 资产后缀（优先 musl） ----------
+detect_arch() {
+	_a=""
+	[ -f /etc/openwrt_release ] && _a=$(sed -n "s/^DISTRIB_ARCH='\(.*\)'/\1/p" /etc/openwrt_release)
+	[ -n "$_a" ] || _a=$(uname -m)
+	case "$_a" in
+		x86_64|amd64) echo amd64-musl ;;
+		i386*|i486*|i586*|i686*) echo 386-musl ;;
+		aarch64*) echo arm64-musl ;;
+		arm_cortex-*) echo armv7-musl ;;
+		arm_arm1176*|arm_arm926*|arm_arm11*|arm_fa526|arm_xscale) echo armv6 ;;
+		mipsel_*) echo mipsle-softfloat-musl ;;
+		mips64el_*) echo mips64le-softfloat ;;
+		mips64_*) echo mips64-softfloat ;;
+		mips_*) echo mips-softfloat ;;
+		riscv64_*) echo riscv64-musl ;;
+		loongarch64_*) echo loong64-musl ;;
+		ppc64le) echo ppc64le ;;
+		*) echo "" ;;
+	esac
+}
+
+# ---------- GitHub 版本解析（无 jq，awk 状态机解析 pretty-printed JSON） ----------
+fetch_releases() {
+	init_dirs
+	_f="$CACHE_DIR/releases.json"
+	_now=$(date +%s)
+	_age=999999
+	[ -f "$_f" ] && _age=$(( _now - $(date -r "$_f" +%s 2>/dev/null || echo 0) ))
+	if [ "$_age" -gt 600 ]; then
+		curl -fsSL -H "User-Agent: $UA" --max-time 25 "${GH_PROXY}${GH_API}?per_page=40" -o "$_f.tmp" || {
+			[ -f "$_f" ] || die "无法访问 GitHub API（可在设置里配置加速前缀）"
+			rm -f "$_f.tmp"
+		}
+		[ -f "$_f.tmp" ] && mv "$_f.tmp" "$_f"
+	fi
+	[ -f "$_f" ] || die "版本列表不可用"
+	awk '
+		/"tag_name":/ { gsub(/[",]/,"",$2); tag=$2 }
+		/"prerelease":/ { gsub(/,/,"",$2); if (tag!="") { print tag, $2; tag="" } }
+	' "$_f"
+}
+
+channel_match() { # <tag> <channel>
+	case "$2" in
+		alpha) case "$1" in *-alpha.*) return 0;; esac ;;
+		beta)  case "$1" in *-beta.*)  return 0;; esac ;;
+		rc)    case "$1" in *-rc.*)    return 0;; esac ;;
+		stable) case "$1" in *-alpha.*|*-beta.*|*-rc.*) return 1;; esac; return 0 ;;
+	esac
+	return 1
+}
+
+channel_latest() { # <channel>
+	fetch_releases | while read -r tag pre; do
+		channel_match "$tag" "$1" && { echo "$tag"; break; }
+	done
+}
+
+channel_list() { # <channel> [limit]
+	_lim=${2:-10}; _n=0
+	fetch_releases | while read -r tag pre; do
+		channel_match "$tag" "$1" || continue
+		echo "$tag"; _n=$((_n+1)); [ "$_n" -ge "$_lim" ] && break
+	done
+}
+
+# ---------- 内核安装 / 回滚 ----------
+do_install() { # <channel> [pinned_tag]
+	_ch="$1"; _pin="${2:-}"
+	if [ -n "$_pin" ]; then _tag="$_pin"; else _tag=$(channel_latest "$_ch"); fi
+	[ -n "${_tag:-}" ] || die "无法解析渠道 [$_ch] 的版本（网络或加速前缀问题）"
+	_arch=$(detect_arch)
+	[ -n "$_arch" ] || die "不支持的架构：$(uname -m)"
+	_ver="${_tag#v}"
+	_asset="sing-box-${_ver}-linux-${_arch}.tar.gz"
+	_url="${GH_PROXY}https://github.com/$GH_REPO/releases/download/${_tag}/${_asset}"
+	init_dirs
+	_dl="$CACHE_DIR/$_asset"
+	curl -fL --retry 2 --max-time 300 -H "User-Agent: $UA" -o "$_dl" "$_url" 2>/dev/null \
+		|| die "下载失败：$_asset（检查网络/加速前缀，或该架构无此资产）"
+	mkdir -p "$CACHE_DIR/x" && rm -rf "$CACHE_DIR/x"/*
+	tar -xzf "$_dl" -C "$CACHE_DIR/x" || die "解压失败：$_asset"
+	_bin=$(find "$CACHE_DIR/x" -type f -name sing-box | head -1)
+	[ -n "$_bin" ] || die "压缩包内未找到 sing-box 可执行文件"
+	chmod 0755 "$_bin" 2>/dev/null
+	"$_bin" version >/dev/null 2>&1 || die "二进制无法运行（架构不匹配？）"
+	# 停机 → 备份旧内核 → 安装
+	_was_running=0
+	pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && _was_running=1
+	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt stop >/dev/null 2>&1
+	_old=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
+	[ -n "$_old" ] && printf '%s' "$_old" > "$STATE_DIR/previous"
+	cp "$_bin" "$INSTALL_DIR/sing-box-${_ver}" && chmod 0755 "$INSTALL_DIR/sing-box-${_ver}"
+	cp "$_bin" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
+	printf '%s' "$_ver" > "$ACTIVE_FILE"
+	_sha=$(sha256sum "$INSTALL_DIR/sing-box-${_ver}" 2>/dev/null | awk '{print $1}')
+	printf '{"version":"%s","sha256":"%s","installed_at":"%s"}\n' "$_ver" "${_sha:-unknown}" "$(date -Is)" \
+		> "$INSTALL_DIR/sing-box-${_ver}.meta"
+	rm -f "$_dl"
+	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
+	ok ",\"version\":\"$_ver\",\"arch\":\"$_arch\",\"restarted\":$([ "$_was_running" = 1 ] && echo true || echo false)"
+}
+
+do_activate() { # <version>
+	_v="$1"
+	[ -x "$INSTALL_DIR/sing-box-${_v}" ] || die "版本未安装：$_v"
+	_cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
+	[ "$_cur" = "$_v" ] && { ok ",\"version\":\"$_v\",\"unchanged\":true"; exit 0; }
+	_was_running=0
+	pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && _was_running=1
+	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt stop >/dev/null 2>&1
+	[ -n "$_cur" ] && printf '%s' "$_cur" > "$STATE_DIR/previous"
+	cp "$INSTALL_DIR/sing-box-${_v}" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
+	printf '%s' "$_v" > "$ACTIVE_FILE"
+	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
+	ok ",\"version\":\"$_v\""
+}
+
+do_rollback() {
+	_prev=$(cat "$STATE_DIR/previous" 2>/dev/null || echo "")
+	[ -n "$_prev" ] || die "没有可回滚的版本记录"
+	[ -x "$INSTALL_DIR/sing-box-${_prev}" ] || die "上一版本二进制不存在：$_prev"
+	_cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
+	_was_running=0
+	pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && _was_running=1
+	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt stop >/dev/null 2>&1
+	cp "$INSTALL_DIR/sing-box-${_prev}" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
+	printf '%s' "$_prev" > "$ACTIVE_FILE"
+	[ -n "$_cur" ] && printf '%s' "$_cur" > "$STATE_DIR/previous"
+	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
+	ok ",\"version\":\"$_prev\""
+}
+
+do_remove() { # <version>
+	_v="$1"; _cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
+	[ "$_v" = "$_cur" ] && die "不能删除当前激活版本（先切换/回滚）"
+	rm -f "$INSTALL_DIR/sing-box-${_v}" "$INSTALL_DIR/sing-box-${_v}.meta"
+	ok ",\"removed\":\"$_v\""
+}
+
+# ---------- 配置管理 ----------
+CONF_CHECK() { # 返回 0/1，并输出错误文本
+	_out=$("$CORE_PATH" check -D "$WORK_DIR" -C "$CONF_DIR" 2>&1); _rc=$?
+	[ "$_rc" = 0 ] && return 0
+	printf '%s' "$_out" >&2; return 1
+}
+
+do_config_save() { # <name>  内容从 stdin
+	_name="$1"; init_dirs
+	case "$_name" in */*|*..*) die "非法文件名";; esac
+	_tmp="$CACHE_DIR/upload-$$.json"
+	cat > "$_tmp" || die "读取上传内容失败"
+	[ -s "$_tmp" ] || die "内容为空"
+	_target="$CONF_DIR/${_name}.json"
+	_bak="$BACKUP_DIR/${_name}-$(date +%Y%m%d-%H%M%S).json"
+	[ -f "$_target" ] && cp "$_target" "$_bak"
+	cp "$_tmp" "$_target"
+	if ! _err=$(CONF_CHECK 2>&1); then
+		[ -f "$_bak" ] && cp "$_bak" "$_target" || rm -f "$_target"
+		rm -f "$_tmp"
+		die "配置校验未通过，已回退：$(printf '%s' "$_err" | tail -3 | tr '\n' ' ')"
+	fi
+	rm -f "$_tmp"
+	ok ",\"file\":\"$(json_esc "$_target")\""
+}
+
+do_config_restore() { # <backup-file>
+	_b="$1"
+	case "$_b" in */*|*..*) die "非法文件名";; esac
+	[ -f "$BACKUP_DIR/$_b" ] || die "备份不存在：$_b"
+	_name=$(printf '%s' "$_b" | sed 's/-[0-9]\{8\}-[0-9]\{6\}\.json$//')
+	cp "$BACKUP_DIR/$_b" "$CONF_DIR/${_name}.json" || die "恢复失败"
+	if ! _err=$(CONF_CHECK 2>&1); then
+		die "恢复后的配置校验未通过：$(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
+	fi
+	ok ",\"restored\":\"$_name\""
+}
+
+do_config_get() { # <name>
+	_f="$CONF_DIR/${1:?}.json"
+	[ -f "$_f" ] || die "配置不存在：${1}"
+	printf '{"ok":true,"name":"%s","content":"' "$(json_esc "${1}")"
+	json_ml < "$_f"
+	printf '"}\n'
+}
+
+do_config_list() {
+	init_dirs
+	printf '{"ok":true,"conf_dir":"%s","files":[' "$(json_esc "$CONF_DIR")"
+	_first=1
+	for f in "$CONF_DIR"/*.json; do
+		[ -f "$f" ] || continue
+		[ "$_first" = 1 ] || printf ','
+		_first=0
+		printf '{"name":"%s","size":%s}' "$(basename "$f" .json)" "$(wc -c < "$f" | tr -d ' ')"
+	done
+	printf '],"backups":['
+	_first=1
+	for f in "$BACKUP_DIR"/*.json; do
+		[ -f "$f" ] || continue
+		[ "$_first" = 1 ] || printf ','
+		_first=0
+		printf '"%s"' "$(basename "$f")"
+	done
+	printf ']}\n'
+}
+
+# ---------- API / 面板托管（独立分片文件，避免改动用户配置） ----------
+do_api_sync() {
+	init_dirs
+	_f="$CONF_DIR/90-isongwrt-api.json"
+	if [ "$DASHBOARD" != 1 ] && [ "$CLASH_API" != 1 ]; then
+		rm -f "$_f"
+		ok ",\"api_file\":null"
+		return 0
+	fi
+	{
+		printf '{\n  "services": [\n    {\n      "type": "api",\n      "tag": "isongwrt-api",\n'
+		printf '      "listen": "%s",\n      "listen_port": %s,\n' "$API_LISTEN" "$API_PORT"
+		[ -n "$API_SECRET" ] && printf '      "secret": "%s",\n' "$(json_esc "$API_SECRET")"
+		printf '      "access_control_allow_private_network": true,\n'
+		if [ "$DASHBOARD" = 1 ]; then
+			printf '      "dashboard": { "enabled": true, "update_interval": "1d" }\n'
+		else
+			printf '      "dashboard": { "enabled": false }\n'
+		fi
+		printf '    }\n  ]'
+		if [ "$CLASH_API" = 1 ]; then
+			printf ',\n  "experimental": {\n    "clash_api": {\n      "external_controller": "%s:%s"' "$API_LISTEN" "$CLASH_PORT"
+			[ -n "$CLASH_SECRET" ] && printf ',\n      "secret": "%s"' "$(json_esc "$CLASH_SECRET")"
+			printf '\n    }\n  }'
+		fi
+		printf '\n}\n'
+	} > "$_f"
+	if ! _err=$(CONF_CHECK 2>&1); then
+		rm -f "$_f"
+		die "生成 API 分片失败（与现有配置冲突？）：$(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
+	fi
+	ok ",\"api_file\":\"$(json_esc "$_f")\""
+}
+
+# ---------- 状态 / 日志 / 服务 ----------
+do_status() {
+	_running=false; _pid=""
+	_p=$(pgrep -f "$CORE_PATH run" 2>/dev/null | head -1)
+	[ -n "$_p" ] && { _running=true; _pid="$_p"; }
+	_ver=""
+	[ -x "$CORE_PATH" ] && _ver=$("$CORE_PATH" version 2>/dev/null | head -1 | awk '{print $3}')
+	_enabled=false
+	ls /etc/rc.d/S*isongwrt >/dev/null 2>&1 && _enabled=true
+	_chk=ok
+	CONF_CHECK >/dev/null 2>&1 || _chk=fail
+	_nfiles=$(ls "$CONF_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')
+	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","dashboard":%s,"clash_api":%s,"config_check":"%s"}\n' \
+		"$_running" "$_pid" "$_enabled" "$(json_esc "$_ver")" "$(cat "$ACTIVE_FILE" 2>/dev/null)" \
+		"$CHANNEL" "$(detect_arch)" "$(json_esc "$CORE_PATH")" "$(json_esc "$CONF_DIR")" "$_nfiles" \
+		"$API_LISTEN" "$API_PORT" "$([ "$DASHBOARD" = 1 ] && echo true || echo false)" \
+		"$([ "$CLASH_API" = 1 ] && echo true || echo false)" "$_chk"
+}
+
+do_installed() {
+	printf '{"ok":true,"active":"%s","previous":"%s","versions":[' \
+		"$(cat "$ACTIVE_FILE" 2>/dev/null)" "$(cat "$STATE_DIR/previous" 2>/dev/null)"
+	_first=1
+	for f in "$INSTALL_DIR"/sing-box-*; do
+		case "$f" in *.meta) continue;; esac
+		[ -f "$f" ] || continue
+		[ "$_first" = 1 ] || printf ','
+		_first=0
+		_v=${f##*/sing-box-}
+		_meta="$INSTALL_DIR/sing-box-${_v}.meta"
+		_sha=$(sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p' "$_meta" 2>/dev/null)
+		printf '{"version":"%s","sha256":"%s","size":%s}' "$_v" "$_sha" "$(wc -c < "$f" | tr -d ' ')"
+	done
+	printf ']}\n'
+}
+
+do_log() {
+	_n=${1:-200}
+	printf '{"ok":true,"log":"'
+	logread 2>/dev/null | grep -E 'isongwrt|sing-box' | tail -n "$_n" | json_ml
+	printf '"}\n'
+}
+
+do_channels() {
+	printf '{"ok":true,"channels":['
+	_first=1
+	for c in stable rc beta alpha; do
+		_latest=$(channel_latest "$c")
+		[ "$_first" = 1 ] || printf ','
+		_first=0
+		printf '{"name":"%s","latest":"%s"}' "$c" "$_latest"
+	done
+	printf ']}\n'
+}
+
+case "${1:-status}" in
+	status)      do_status ;;
+	channels)    do_channels ;;
+	releases)    { printf '{"ok":true,"channel":"%s","releases":[' "${2:-stable}"; _f=1
+	              for _r in $(channel_list "${2:-stable}" "${3:-12}"); do
+	                [ "$_f" = 1 ] || printf ','; _f=0; printf '"%s"' "$_r"
+	              done; printf ']}\n'; } ;;
+	installed)   do_installed ;;
+	install)     do_install "${2:-stable}" "${3:-}" ;;
+	activate)    do_activate "${2:?}" ;;
+	rollback)    do_rollback ;;
+	remove)      do_remove "${2:?}" ;;
+	config-list)    do_config_list ;;
+	config-get)     do_config_get "${2:?}" ;;
+	config-save)    do_config_save "${2:?}" ;;
+	config-restore) do_config_restore "${2:?}" ;;
+	config-backup)  mkdir -p "$BACKUP_DIR"; _d="$BACKUP_DIR/snapshot-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$_d"; cp "$CONF_DIR"/*.json "$_d/" 2>/dev/null; ok ",\"snapshot\":\"$(json_esc "$_d")\"" ;;
+	api-sync)    do_api_sync ;;
+	check)       if _e=$(CONF_CHECK 2>&1); then ok; else die "$(printf '%s' "$_e" | tail -3 | tr '\n' ' ')"; fi ;;
+	log)         do_log "${2:-200}" ;;
+	service)     case "${2:-}" in
+			start|stop|restart|enable|disable) /etc/init.d/isongwrt "$2" >/dev/null 2>&1 && ok || die "服务操作失败：$2" ;;
+			*) die "service 需要 start|stop|restart|enable|disable" ;;
+		esac ;;
+	*) die "未知命令：${1:-}" ;;
+esac

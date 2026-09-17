@@ -1,0 +1,18 @@
+{
+	"luci-app-isongwrt": {
+		"description": "Grant access to isongwrt (sing-box core manager)",
+		"read": {
+			"uci": [ "isongwrt" ],
+			"file": {
+				"/usr/lib/isongwrt/ctl": [ "exec" ]
+			}
+		},
+		"write": {
+			"uci": [ "isongwrt" ],
+			"file": {
+				"/usr/lib/isongwrt/ctl": [ "exec" ],
+				"/tmp/isongwrt-upload.json": [ "write" ]
+			}
+		}
+	}
+}
