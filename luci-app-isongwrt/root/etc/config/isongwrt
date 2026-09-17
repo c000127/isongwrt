@@ -13,6 +13,8 @@ config isongwrt 'main'
 	option api_port '9090'
 	option api_secret ''
 	option dashboard '1'
+	# 面板资源下载地址（留空 = 官方默认 gh-pages zip；CN 可填镜像）
+	option dashboard_download_url ''
 	# 可选：Clash API（供 zashboard/metacubexd 等面板）
 	option clash_api '0'
 	option clash_port '9091'

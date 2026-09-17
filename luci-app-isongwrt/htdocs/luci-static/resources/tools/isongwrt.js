@@ -7,14 +7,11 @@ var CTL = '/usr/lib/isongwrt/ctl';
 function call(args) {
 	return fs.exec(CTL, args || []).then(function (res) {
 		var out = ((res && res.stdout) || '').trim();
-		try {
-			return JSON.parse(out);
-		} catch (e) {
-			return {
-				ok: false,
-				error: out || ((res && res.stderr) || '').trim() || '空输出'
-			};
-		}
+		var err = ((res && res.stderr) || '').trim();
+		function tryParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+		var parsed = tryParse(out) || tryParse(err);
+		if (parsed) return parsed;
+		return { ok: false, error: out || err || '空输出' };
 	}).catch(function (e) {
 		return { ok: false, error: (e && e.message) || String(e) };
 	});

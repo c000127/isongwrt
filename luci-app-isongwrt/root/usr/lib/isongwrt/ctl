@@ -19,7 +19,7 @@ cfg()  { uci -q get "isongwrt.main.$1" 2>/dev/null; }
 cfgd() { _v=$(cfg "$1"); [ -n "${_v:-}" ] && printf '%s' "$_v" || printf '%s' "$2"; }
 json_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g'; }
 json_ml()  { awk '{ gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); printf "%s\\n", $0 }' | sed -e 's/\\n$//'; }
-die() { printf '{"ok":false,"error":"%s"}\n' "$(json_esc "$1")"; exit 1; }
+die() { printf '{"ok":false,"error":"%s"}\n' "$(json_esc "$1")" >&2; exit 1; }
 ok()  { printf '{"ok":true%s}\n' "${1:-}"; }
 
 CORE_PATH=$(cfgd core_path /usr/lib/isongwrt/sing-box)
@@ -34,6 +34,7 @@ DASHBOARD=$(cfgd dashboard 1)
 CLASH_API=$(cfgd clash_api 0)
 CLASH_PORT=$(cfgd clash_port 9091)
 CLASH_SECRET=$(cfgd clash_secret '')
+DASH_URL=$(cfgd dashboard_download_url '')
 
 init_dirs() {
 	mkdir -p "$INSTALL_DIR" "$BACKUP_DIR" "$CONF_DIR" "$CACHE_DIR" "$WORK_DIR" 2>/dev/null
@@ -62,20 +63,33 @@ detect_arch() {
 }
 
 # ---------- GitHub 版本解析（无 jq，awk 状态机解析 pretty-printed JSON） ----------
+# 版本来源：优先 releases.atom（约 20KB，github.com CDN），失败退回 REST API
+fetch_releases_atom() {
+	_a="$CACHE_DIR/releases.atom"
+	_now=$(date +%s); _age=999999
+	[ -f "$_a" ] && _age=$(( _now - $(date -r "$_a" +%s 2>/dev/null || echo 0) ))
+	if [ "$_age" -gt 600 ]; then
+		curl -fsSL --max-time 20 -H "User-Agent: $UA" "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" -o "$_a.tmp" 2>/dev/null || { rm -f "$_a.tmp"; return 1; }
+		mv "$_a.tmp" "$_a"
+	fi
+	[ -s "$_a" ] || return 1
+	# 权威 tag 在 <id>tag:github.com,2008:Repository/<n>/v1.15.0-alpha.5</id>
+	# （entry 的 <title> 不带 v 前缀，不可用于下载 URL）
+	sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9]*/\(v[^<]*\)</id>.*#\1#p' "$_a"
+}
+
 fetch_releases() {
 	init_dirs
+	if fetch_releases_atom; then rm -f "$CACHE_DIR/releases.json"; return 0; fi
 	_f="$CACHE_DIR/releases.json"
 	_now=$(date +%s)
 	_age=999999
 	[ -f "$_f" ] && _age=$(( _now - $(date -r "$_f" +%s 2>/dev/null || echo 0) ))
 	if [ "$_age" -gt 600 ]; then
-		curl -fsSL -H "User-Agent: $UA" --max-time 25 "${GH_PROXY}${GH_API}?per_page=40" -o "$_f.tmp" || {
-			[ -f "$_f" ] || die "无法访问 GitHub API（可在设置里配置加速前缀）"
-			rm -f "$_f.tmp"
-		}
+		curl -fsSL -H "User-Agent: $UA" --max-time 25 "${GH_PROXY}${GH_API}?per_page=15" -o "$_f.tmp" 2>/dev/null || { rm -f "$_f.tmp"; [ -f "$_f" ] || return 1; }
 		[ -f "$_f.tmp" ] && mv "$_f.tmp" "$_f"
 	fi
-	[ -f "$_f" ] || die "版本列表不可用"
+	[ -f "$_f" ] || return 1
 	awk '
 		/"tag_name":/ { gsub(/[",]/,"",$2); tag=$2 }
 		/"prerelease":/ { gsub(/,/,"",$2); if (tag!="") { print tag, $2; tag="" } }
@@ -118,8 +132,14 @@ do_install() { # <channel> [pinned_tag]
 	_url="${GH_PROXY}https://github.com/$GH_REPO/releases/download/${_tag}/${_asset}"
 	init_dirs
 	_dl="$CACHE_DIR/$_asset"
-	curl -fL --retry 2 --max-time 300 -H "User-Agent: $UA" -o "$_dl" "$_url" 2>/dev/null \
-		|| die "下载失败：$_asset（检查网络/加速前缀，或该架构无此资产）"
+	printf '[1/4] 版本 %s，架构 %s\n' "$_tag" "$_arch" >&2
+	printf '[2/4] 下载 %s\n' "$_asset" >&2
+	# 断点续传 + 长超时（慢链路可用）；进度与错误走 stderr，stdout 只留最终 JSON
+	if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -C - \
+			-H "User-Agent: $UA" -o "$_dl" "$_url" 2>>"$CACHE_DIR/dl.err"; then
+		die "下载失败：$_asset（$(tail -1 "$CACHE_DIR/dl.err" 2>/dev/null | tr -d '"')）"
+	fi
+	printf '[3/4] 解压与校验\n' >&2
 	mkdir -p "$CACHE_DIR/x" && rm -rf "$CACHE_DIR/x"/*
 	tar -xzf "$_dl" -C "$CACHE_DIR/x" || die "解压失败：$_asset"
 	_bin=$(find "$CACHE_DIR/x" -type f -name sing-box | head -1)
@@ -138,6 +158,7 @@ do_install() { # <channel> [pinned_tag]
 	_sha=$(sha256sum "$INSTALL_DIR/sing-box-${_ver}" 2>/dev/null | awk '{print $1}')
 	printf '{"version":"%s","sha256":"%s","installed_at":"%s"}\n' "$_ver" "${_sha:-unknown}" "$(date -Is)" \
 		> "$INSTALL_DIR/sing-box-${_ver}.meta"
+	printf '[4/4] 安装完成并激活 %s\n' "$_ver" >&2
 	rm -f "$_dl"
 	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
 	ok ",\"version\":\"$_ver\",\"arch\":\"$_arch\",\"restarted\":$([ "$_was_running" = 1 ] && echo true || echo false)"
@@ -180,8 +201,48 @@ do_remove() { # <version>
 	ok ",\"removed\":\"$_v\""
 }
 
+# ---------- 后台安装（Web 面板用：避免慢链路阻塞请求） ----------
+INSTALL_LOG="$CACHE_DIR/install.log"
+INSTALL_LOCK="$CACHE_DIR/install.lock"
+
+do_install_bg() { # <channel> [tag]
+	_ch="$1"; _pin="${2:-}"
+	init_dirs
+	if [ -f "$INSTALL_LOCK" ] && kill -0 "$(cat "$INSTALL_LOCK" 2>/dev/null)" 2>/dev/null; then
+		die "已有安装任务正在进行（可查看进度）"
+	fi
+	rm -f "$INSTALL_LOCK"
+	: > "$INSTALL_LOG"
+	# busybox 无 nohup：子 shell 后台 + 重定向即可（无控制终端，父进程退出不影响）
+	( /usr/lib/isongwrt/ctl install "$_ch" "$_pin" >> "$INSTALL_LOG" 2>&1 & echo $! > "$INSTALL_LOCK" )
+	sleep 1
+	ok ",\"pid\":$(cat "$INSTALL_LOCK" 2>/dev/null || echo 0)"
+}
+
+do_install_status() {
+	_running=false
+	if [ -f "$INSTALL_LOCK" ] && kill -0 "$(cat "$INSTALL_LOCK" 2>/dev/null)" 2>/dev/null; then
+		_running=true
+	fi
+	_state=idle
+	if grep -q '"ok":true' "$INSTALL_LOG" 2>/dev/null; then
+		_state=done; _running=false
+	elif grep -q '"ok":false' "$INSTALL_LOG" 2>/dev/null; then
+		_state=failed; _running=false
+	elif [ "$_running" = true ]; then
+		_state=running
+	fi
+	_size=$(wc -c < "$INSTALL_LOG" 2>/dev/null | tr -d ' ')
+	printf '{"ok":true,"running":%s,"state":"%s","log":"' "$_running" "$_state"
+	tail -c 3000 "$INSTALL_LOG" 2>/dev/null | json_ml
+	printf '"}\n'
+}
+
 # ---------- 配置管理 ----------
 CONF_CHECK() { # 返回 0/1，并输出错误文本
+	if [ ! -x "$CORE_PATH" ]; then
+		printf '%s' "尚未安装 sing-box 内核（先到「内核管理」安装）" >&2; return 1
+	fi
 	_out=$("$CORE_PATH" check -D "$WORK_DIR" -C "$CONF_DIR" 2>&1); _rc=$?
 	[ "$_rc" = 0 ] && return 0
 	printf '%s' "$_out" >&2; return 1
@@ -257,12 +318,19 @@ do_api_sync() {
 		return 0
 	fi
 	{
-		printf '{\n  "services": [\n    {\n      "type": "api",\n      "tag": "isongwrt-api",\n'
+		# 面板下载需要显式 HTTP client（1.14 起隐式默认客户端已弃用并会 FATAL）；
+		# 这里只给 dashboard 指定专用 client，不覆盖用户的 route.default_http_client。
+		printf '{\n  "http_clients": [ { "tag": "isongwrt-dashboard" } ],\n'
+		printf '  "services": [\n    {\n      "type": "api",\n      "tag": "isongwrt-api",\n'
 		printf '      "listen": "%s",\n      "listen_port": %s,\n' "$API_LISTEN" "$API_PORT"
 		[ -n "$API_SECRET" ] && printf '      "secret": "%s",\n' "$(json_esc "$API_SECRET")"
 		printf '      "access_control_allow_private_network": true,\n'
 		if [ "$DASHBOARD" = 1 ]; then
-			printf '      "dashboard": { "enabled": true, "update_interval": "1d" }\n'
+			if [ -n "$DASH_URL" ]; then
+				printf '      "dashboard": { "enabled": true, "update_interval": "1d", "http_client": "isongwrt-dashboard", "download_url": "%s" }\n' "$(json_esc "$DASH_URL")"
+			else
+				printf '      "dashboard": { "enabled": true, "update_interval": "1d", "http_client": "isongwrt-dashboard" }\n'
+			fi
 		else
 			printf '      "dashboard": { "enabled": false }\n'
 		fi
@@ -278,7 +346,11 @@ do_api_sync() {
 		rm -f "$_f"
 		die "生成 API 分片失败（与现有配置冲突？）：$(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
 	fi
-	ok ",\"api_file\":\"$(json_esc "$_f")\""
+	_busy=""
+	if [ "$DASHBOARD" = 1 ] && netstat -tln 2>/dev/null | grep -q ":$API_PORT "; then
+		pgrep -f "$CORE_PATH run" >/dev/null 2>&1 || _busy="（注意：端口 $API_PORT 已被其它程序占用，服务可能启动失败）"
+	fi
+	ok ",\"api_file\":\"$(json_esc "$_f")\",\"warning\":\"$_busy\""
 }
 
 # ---------- 状态 / 日志 / 服务 ----------
@@ -293,10 +365,15 @@ do_status() {
 	_chk=ok
 	CONF_CHECK >/dev/null 2>&1 || _chk=fail
 	_nfiles=$(ls "$CONF_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')
-	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","dashboard":%s,"clash_api":%s,"config_check":"%s"}\n' \
+	_port_busy=false
+	if netstat -tln 2>/dev/null | grep -q ":$API_PORT "; then
+		# 若占用者不是本服务（未运行时），视为冲突
+		[ "$_running" = false ] && _port_busy=true
+	fi
+	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","api_port_busy":%s,"dashboard":%s,"clash_api":%s,"config_check":"%s"}\n' \
 		"$_running" "$_pid" "$_enabled" "$(json_esc "$_ver")" "$(cat "$ACTIVE_FILE" 2>/dev/null)" \
 		"$CHANNEL" "$(detect_arch)" "$(json_esc "$CORE_PATH")" "$(json_esc "$CONF_DIR")" "$_nfiles" \
-		"$API_LISTEN" "$API_PORT" "$([ "$DASHBOARD" = 1 ] && echo true || echo false)" \
+		"$API_LISTEN" "$API_PORT" "$_port_busy" "$([ "$DASHBOARD" = 1 ] && echo true || echo false)" \
 		"$([ "$CLASH_API" = 1 ] && echo true || echo false)" "$_chk"
 }
 
@@ -325,6 +402,9 @@ do_log() {
 }
 
 do_channels() {
+	if ! fetch_releases >/dev/null 2>&1; then
+		die "无法获取版本列表（GitHub 不可达或被限速，可在「内核管理」页填写加速前缀）"
+	fi
 	printf '{"ok":true,"channels":['
 	_first=1
 	for c in stable rc beta alpha; do
@@ -345,6 +425,8 @@ case "${1:-status}" in
 	              done; printf ']}\n'; } ;;
 	installed)   do_installed ;;
 	install)     do_install "${2:-stable}" "${3:-}" ;;
+	install-bg)     do_install_bg "${2:-stable}" "${3:-}" ;;
+	install-status) do_install_status ;;
 	activate)    do_activate "${2:?}" ;;
 	rollback)    do_rollback ;;
 	remove)      do_remove "${2:?}" ;;
@@ -357,7 +439,18 @@ case "${1:-status}" in
 	check)       if _e=$(CONF_CHECK 2>&1); then ok; else die "$(printf '%s' "$_e" | tail -3 | tr '\n' ' ')"; fi ;;
 	log)         do_log "${2:-200}" ;;
 	service)     case "${2:-}" in
-			start|stop|restart|enable|disable) /etc/init.d/isongwrt "$2" >/dev/null 2>&1 && ok || die "服务操作失败：$2" ;;
+			start|stop|restart)
+				/etc/init.d/isongwrt "$2" >/dev/null 2>&1 || die "服务操作失败：$2"
+				case "$2" in
+					start|restart)
+						sleep 2
+						if ! pgrep -f "$CORE_PATH run" >/dev/null 2>&1; then
+							_err=$(logread 2>/dev/null | grep -iE 'sing-box|isongwrt' | tail -2 | sed 's/.*sing-box\[[0-9]*\]: //' | tr '\n' ' ')
+							die "服务未能启动：${_err:-未知原因（检查配置与端口占用）}"
+						fi ;;
+				esac
+				ok ",\"action\":\"$2\"" ;;
+			enable|disable) /etc/init.d/isongwrt "$2" >/dev/null 2>&1 && ok || die "服务操作失败：$2" ;;
 			*) die "service 需要 start|stop|restart|enable|disable" ;;
 		esac ;;
 	*) die "未知命令：${1:-}" ;;

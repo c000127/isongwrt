@@ -10,7 +10,7 @@ OpenWrt / iStoreOS 上的 **sing-box 轻量管理面板**（LuCI 应用）。
 | 2 | **配置管理** | Web 上传 / 在线编辑 / 校验 / 备份恢复；配置以「分片目录」方式加载（`sing-box run -C <conf_dir>`），面板自动维护 API 分片，不覆盖你的配置 |
 | 3 | **控制启停** | 启动 / 停止 / 重启 / 开机自启（procd 托管，崩溃自动拉起） |
 | 4 | **日志查看** | 面板内置日志页，读取 syslog 中内核输出，支持自动刷新 |
-| 5 | **Web 管理面板** | 一键启用 sing-box 1.14+ 内置 `api` 服务：官方 **sing-box-dashboard** 由内核自动下载并托管在 `/dashboard/`；可选启用 Clash API 以便使用 zashboard / metacubexd |
+| 5 | **Web 管理面板** | 一键启用 sing-box 1.14+ 内置 `api` 服务：官方 **sing-box-dashboard** 由内核自动下载（约 8MB）并托管在 `/dashboard/`；下载源可换成镜像；可选启用 Clash API 以便使用 zashboard / metacubexd |
 
 > 与官方 `sing-box` 软件包**互不干扰**：isongwrt 使用自己的内核路径（`/usr/lib/isongwrt/sing-box`）与服务名（`isongwrt`），可以与你已有的 sing-box 包共存或替代。
 
@@ -66,7 +66,7 @@ make package/luci-app-isongwrt/compile V=s
 
 ### 第一次使用
 
-1. 「内核管理」选渠道 → **开始安装**（网络受限时填 GitHub 加速前缀，如 `https://ghfast.top/`）
+1. 「内核管理」选渠道 → **开始安装**：安装以后台任务执行（**支持断点续传**，慢链路不阻塞页面），弹窗实时显示进度日志（网络受限时填 GitHub 加速前缀，如 `https://ghfast.top/`）
 2. 「配置管理」上传你的 sing-box 配置（保存为 `10-user.json`），保存时会自动校验
 3. 「运行状态」勾选**开机自启**并**启动**
 4. 「面板」保存并应用 → 打开面板（默认 `http://<路由器>:9090/dashboard/`）
@@ -77,7 +77,7 @@ make package/luci-app-isongwrt/compile V=s
 /etc/isongwrt/
 ├── conf/                      # sing-box -C 分片目录
 │   ├── 10-user.json           # 你的配置（面板上传/编辑）
-│   └── 90-isongwrt-api.json   # 面板维护：api 服务 / dashboard / 可选 Clash API
+│   └── 90-isongwrt-api.json   # 面板维护：http_clients + api 服务 / dashboard / 可选 Clash API
 ├── installed/                 # 历史内核（可回滚）
 ├── backups/                   # 配置备份
 ├── active                     # 当前激活版本
@@ -96,6 +96,12 @@ make package/luci-app-isongwrt/compile V=s
   下载解压到工作目录的 `dashboard/` → 在 API 监听端口上以 `/dashboard/` 提供，其它浏览器请求自动跳转过去；
   默认每天检查更新（`update_interval`）。
 - 因此 isongwrt **不需要打包任何前端**，面板随内核更新。
+- **已知要求**：从 1.14 起，「隐式默认 HTTP client」已弃用并会直接导致内核**启动失败**（`FATAL ... ENABLE_DEPRECATED_IMPLICIT_DEFAULT_HTTP_CLIENT`）。
+  本面板生成的 API 分片自带 `http_clients`（tag `isongwrt-dashboard`）并只给 dashboard 指定该 client，**不会覆盖你配置里的 `route.default_http_client`**。
+  若你自己的配置含远程规则集且未声明 HTTP client，请自行补 `http_clients` + `route.default_http_client`（模板已内置）。
+- **下载慢/下载失败怎么办**：面板 zip 默认来自 `https://github.com/SagerNet/sing-box-dashboard/archive/refs/heads/gh-pages.zip`。
+  ① 在「面板」页把**面板资源下载地址**换成镜像；② 或手工把面板文件放进 `<work_dir>/dashboard/`——**非空且无 `.etag` 时内核按原样提供、不再自动更新**（离线部署可用）。
+- **端口冲突**：`api_port` 默认 `9090`，与 mihomo/nikki 的 Clash API 默认端口相同；若同机跑过 nikki，请改成如 `9095`，否则内核启动会因 `bind: address already in use` 失败（面板状态页会显示端口占用提示，启动失败也会直接把日志原因回显）。
 - 想用 Clash 协议面板（zashboard / metacubexd）：在「面板」页开启 **Clash API**，把面板地址指向 `<路由器>:<clash_port>`，密钥填 Clash 密钥即可。
 
 ## UCI 配置参考
@@ -112,6 +118,7 @@ config isongwrt 'main'
 	option api_port '9090'
 	option api_secret ''
 	option dashboard '1'          # 官方 dashboard
+	option dashboard_download_url '' # 面板资源下载地址（留空=官方；CN 可填镜像）
 	option clash_api '0'          # 可选 Clash API
 	option clash_port '9091'
 	option clash_secret ''
@@ -152,7 +159,11 @@ luci-app-isongwrt/
 
 ## 已知限制 / 待办
 
-- 内核下载使用 GitHub Releases；受限网络请配置加速前缀（面板内可填）。
+- **渠道解析用 releases.atom**（约 20KB，比 REST API 的数十 MB 响应更适合路由器）；
+  因此仅覆盖最近约 20 个版本——`beta` 等较老渠道若显示为空，请用「指定版本」输入框直接填 tag。
+- 内核下载使用 GitHub Releases；受限网络请配置加速前缀（面板内可填），下载支持断点续传。
+- 面板 UI 的点击级验证需在浏览器完成（本仓库开发时已在测试机验证：静态资源 200、菜单/ACL 就位、
+  后端与内核全链路真机通过）。
 - 面板自身不带代理链，首次下载内核前若无网络出口，可先用其它方式放一份内核到 `core_path`。
 - 未做 i18n（界面为中文），如需英文可后续补 po。
 - 未内置 sing-box 配置模板市场（保持简单；配置由用户上传）。
