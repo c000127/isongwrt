@@ -411,16 +411,21 @@ do_status() {
 	[ -x "$CORE_PATH" ] && _ver=$("$CORE_PATH" version 2>/dev/null | head -1 | awk '{print $3}')
 	_enabled=false
 	[ "$(cfgd enabled 0)" = "1" ] && _enabled=true
-	_chk=ok
-	CONF_CHECK >/dev/null 2>&1 || _chk=fail
+	_core_installed=false
+	[ -x "$CORE_PATH" ] && _core_installed=true
+	_chk=n/a
+	if [ "$_core_installed" = true ]; then
+		_chk=ok
+		CONF_CHECK >/dev/null 2>&1 || _chk=fail
+	fi
 	_nfiles=$(ls "$CONF_DIR"/*.json 2>/dev/null | wc -l | tr -d ' ')
 	_port_busy=false
 	if netstat -tln 2>/dev/null | grep -q ":$API_PORT "; then
 		# 若占用者不是本服务（未运行时），视为冲突
 		[ "$_running" = false ] && _port_busy=true
 	fi
-	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","api_port_busy":%s,"dashboard":%s,"clash_api":%s,"config_check":"%s"}\n' \
-		"$_running" "$_pid" "$_enabled" "$(json_esc "$_ver")" "$(cat "$ACTIVE_FILE" 2>/dev/null)" \
+	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","core_installed":%s,"channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","api_port_busy":%s,"dashboard":%s,"clash_api":%s,"config_check":"%s"}\n' \
+		"$_running" "$_pid" "$_enabled" "$(json_esc "$_ver")" "$(cat "$ACTIVE_FILE" 2>/dev/null)" "$_core_installed" \
 		"$CHANNEL" "$(detect_arch)" "$(json_esc "$CORE_PATH")" "$(json_esc "$CONF_DIR")" "$_nfiles" \
 		"$API_LISTEN" "$API_PORT" "$_port_busy" "$([ "$DASHBOARD" = 1 ] && echo true || echo false)" \
 		"$([ "$CLASH_API" = 1 ] && echo true || echo false)" "$_chk"
