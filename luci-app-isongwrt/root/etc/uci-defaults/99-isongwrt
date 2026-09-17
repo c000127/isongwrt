@@ -16,7 +16,8 @@ if ! ls /etc/isongwrt/conf/*.json >/dev/null 2>&1; then
       "auto_route": true, "strict_route": true }
   ],
   "outbounds": [ { "type": "direct", "tag": "direct" } ],
-  "route": { "final": "direct" }
+  "http_clients": [ { "tag": "default" } ],
+  "route": { "final": "direct", "default_http_client": "default" }
 }
 SAMPLE
 fi

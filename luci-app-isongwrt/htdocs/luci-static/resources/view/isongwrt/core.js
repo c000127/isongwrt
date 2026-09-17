@@ -34,11 +34,34 @@ return view.extend({
 	install: function () {
 		var self = this, ch = this.channel, pin = (this.pin || '').trim();
 		var label = pin ? ('安装 ' + pin) : ('安装 ' + ch + ' 渠道最新版');
-		return iso.busy(iso.call(pin ? ['install', ch, pin] : ['install', ch]), label + '（下载中，请稍候）…')
-			.then(function (r) {
-				iso.notify(r, label + ' 完成');
-				return self.reload();
+		var pre = E('pre', {
+			'style': 'max-height:40vh;overflow:auto;white-space:pre-wrap;font-size:12px;background:#111;color:#ddd;padding:8px'
+		}, '正在启动安装任务…');
+		var closeBtn = E('button', { 'class': 'btn', 'click': function () { ui.hideModal(); } }, '关闭');
+		ui.showModal(label, [ pre, E('div', { 'class': 'right' }, closeBtn) ]);
+		var timer = null;
+		function stop() { if (timer) { clearInterval(timer); timer = null; } }
+		function poll() {
+			return iso.call(['install-status']).then(function (r) {
+				pre.textContent = (r && r.log) || '(无输出)';
+				pre.scrollTop = pre.scrollHeight;
+				if (!r || r.state === 'done') {
+					stop();
+					iso.notify({ ok: true }, label + ' 完成');
+					return self.reload();
+				}
+				if (r.state === 'failed') {
+					stop();
+					iso.notify({ ok: false, error: '安装失败，详见日志' }, '');
+					return self.reload();
+				}
 			});
+		}
+		return iso.call(pin ? ['install-bg', ch, pin] : ['install-bg', ch]).then(function (r) {
+			if (!r || !r.ok) { stop(); ui.hideModal(); iso.notify(r, ''); return; }
+			timer = setInterval(poll, 3000);
+			return poll();
+		});
 	},
 
 	paint: function () {

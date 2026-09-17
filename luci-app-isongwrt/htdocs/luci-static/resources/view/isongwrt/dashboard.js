@@ -26,7 +26,8 @@ return view.extend({
 			dashboard: iso.get('dashboard', '1') === '1',
 			clash_api: iso.get('clash_api', '0') === '1',
 			clash_port: iso.get('clash_port', '9091'),
-			clash_secret: iso.get('clash_secret', '')
+			clash_secret: iso.get('clash_secret', ''),
+			dashboard_download_url: iso.get('dashboard_download_url', '')
 		};
 		this.root = E('div', { 'class': 'cbi-map' });
 		this.paint();
@@ -42,6 +43,7 @@ return view.extend({
 		iso.set('clash_api', c.clash_api ? '1' : '0');
 		iso.set('clash_port', c.clash_port);
 		iso.set('clash_secret', c.clash_secret);
+		iso.set('dashboard_download_url', c.dashboard_download_url);
 		return iso.applyUci().then(function () {
 			return iso.busy(iso.call(['api-sync']), '生成 API 分片并校验…');
 		}).then(function (r) {
@@ -78,7 +80,12 @@ return view.extend({
 				field('访问密钥', E('input', {
 					'type': 'text', 'class': 'cbi-input-text', 'value': c.api_secret,
 					'input': ui.createHandlerFn(this, function (ev) { this.cfg.api_secret = ev.target.value; })
-				}), '客户端以 Authorization: Bearer <secret> 认证；面板登录时填写此密钥')
+				}), '客户端以 Authorization: Bearer <secret> 认证；面板登录时填写此密钥'),
+				field('面板资源下载地址', E('input', {
+					'type': 'text', 'class': 'cbi-input-text', 'value': c.dashboard_download_url,
+					'placeholder': '留空 = 官方 gh-pages zip',
+					'input': ui.createHandlerFn(this, function (ev) { this.cfg.dashboard_download_url = ev.target.value; })
+				}), 'CN 网络下载慢时可填镜像地址；也可手工把面板文件放入 工作目录/dashboard/（非空且无 .etag 时按原样提供、不再自动更新）')
 			]),
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, '可选：Clash API（zashboard / metacubexd 等面板）'),
