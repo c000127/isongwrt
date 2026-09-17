@@ -49,7 +49,7 @@ opkg install luci-app-isongwrt_*_all.ipk        # 24.10
 apk add luci-app-isongwrt-*.apk                 # 25.x
 ```
 
-装完刷新 LuCI（`/etc/init.d/uhttpd restart`），菜单：**服务 → isongwrt**。依赖：`curl`、`ca-bundle`。
+装完刷新 LuCI（`/etc/init.d/uhttpd restart`），菜单：**服务 → isongwrt**。仅依赖 `ca-bundle`（下载走系统自带 `uclient-fetch`，无需 curl）。
 
 ### C. 自行编译
 
