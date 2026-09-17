@@ -23,19 +23,22 @@ OpenWrt / iStoreOS 上的 **sing-box 轻量管理面板**（LuCI 应用）。
 
 ```sh
 # 一键：自动识别版本与架构、添加 feed（含签名公钥）并安装；feed 不可达时回退 Releases
-wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/install.sh | sh
+wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
 ```
+
+> `raw.githubusercontent.com` 在部分网络（含国内）不可达，因此脚本与 feed 默认走 **jsDelivr CDN**，
+> 并自动回退 `fastly.jsdelivr.net` → `raw.githubusercontent.com`；可用 `ISONGWRT_FEED_BASE` 指定自建镜像。
 
 分两步自己控制：
 
 ```sh
-wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/feed.sh | sh   # 加源
+wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/feed.sh | sh   # 加源
 opkg install luci-app-isongwrt        # 24.10
 apk add luci-app-isongwrt             # 25.x
 ```
 
-feed 由 CI 发布在 `feed` 分支：`https://raw.githubusercontent.com/c000127/isongwrt/feed/<branch>/<arch>/isongwrt`
-（国内慢时脚本自动改用 jsDelivr，也可用 `ISONGWRT_FEED_BASE` 指定镜像）。
+feed 由 CI 发布在 `feed` 分支，经 jsDelivr 分发：
+`https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed/<branch>/<arch>/isongwrt`。
 
 **关于签名**：feed 索引已用密钥签名（ipk 用 usign，apk 用 PEM），公钥随 feed 发布、`feed.sh` 自动导入。
 签名用于防「镜像/链路被替换成恶意包」；未导入公钥时 apk 需 `--allow-untrusted`（脚本会自动处理）。

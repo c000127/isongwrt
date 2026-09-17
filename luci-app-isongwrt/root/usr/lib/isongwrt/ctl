@@ -40,6 +40,33 @@ init_dirs() {
 	mkdir -p "$INSTALL_DIR" "$BACKUP_DIR" "$CONF_DIR" "$CACHE_DIR" "$WORK_DIR" 2>/dev/null
 }
 
+# ---------- 下载器（无 curl 依赖：优先 curl，其次 OpenWrt 自带 uclient-fetch / busybox wget） ----------
+dl_get() { # <url> <outfile> [timeout]
+	_u="$1"; _o="$2"; _t="${3:-60}"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL --max-time "$_t" -H "User-Agent: $UA" -o "$_o" "$_u"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -O "$_o" "$_u"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q -T "$_t" -O "$_o" "$_u"
+	else
+		return 1
+	fi
+}
+
+dl_resume() { # <url> <outfile>：尽量断点续传（curl/wget 支持；uclient-fetch 则整文件重下）
+	_u="$1"; _o="$2"
+	if command -v curl >/dev/null 2>&1; then
+		curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -C - -H "User-Agent: $UA" -o "$_o" "$_u"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -c -q -O "$_o" "$_u"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -O "$_o" "$_u"
+	else
+		return 1
+	fi
+}
+
 # ---------- 架构映射：OpenWrt DISTRIB_ARCH → sing-box linux 资产后缀（优先 musl） ----------
 detect_arch() {
 	_a=""
@@ -69,7 +96,7 @@ fetch_releases_atom() {
 	_now=$(date +%s); _age=999999
 	[ -f "$_a" ] && _age=$(( _now - $(date -r "$_a" +%s 2>/dev/null || echo 0) ))
 	if [ "$_age" -gt 600 ]; then
-		curl -fsSL --max-time 20 -H "User-Agent: $UA" "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" -o "$_a.tmp" 2>/dev/null || { rm -f "$_a.tmp"; return 1; }
+		dl_get "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" "$_a.tmp" 20 2>/dev/null || { rm -f "$_a.tmp"; return 1; }
 		mv "$_a.tmp" "$_a"
 	fi
 	[ -s "$_a" ] || return 1
@@ -86,7 +113,7 @@ fetch_releases() {
 	_age=999999
 	[ -f "$_f" ] && _age=$(( _now - $(date -r "$_f" +%s 2>/dev/null || echo 0) ))
 	if [ "$_age" -gt 600 ]; then
-		curl -fsSL -H "User-Agent: $UA" --max-time 25 "${GH_PROXY}${GH_API}?per_page=15" -o "$_f.tmp" 2>/dev/null || { rm -f "$_f.tmp"; [ -f "$_f" ] || return 1; }
+		dl_get "${GH_PROXY}${GH_API}?per_page=15" "$_f.tmp" 25 2>/dev/null || { rm -f "$_f.tmp"; [ -f "$_f" ] || return 1; }
 		[ -f "$_f.tmp" ] && mv "$_f.tmp" "$_f"
 	fi
 	[ -f "$_f" ] || return 1
@@ -135,8 +162,7 @@ do_install() { # <channel> [pinned_tag]
 	printf '[1/4] 版本 %s，架构 %s\n' "$_tag" "$_arch" >&2
 	printf '[2/4] 下载 %s\n' "$_asset" >&2
 	# 断点续传 + 长超时（慢链路可用）；进度与错误走 stderr，stdout 只留最终 JSON
-	if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 -C - \
-			-H "User-Agent: $UA" -o "$_dl" "$_url" 2>>"$CACHE_DIR/dl.err"; then
+	if ! dl_resume "$_url" "$_dl" 2>>"$CACHE_DIR/dl.err"; then
 		die "下载失败：$_asset（$(tail -1 "$CACHE_DIR/dl.err" 2>/dev/null | tr -d '"')）"
 	fi
 	printf '[3/4] 解压与校验\n' >&2
