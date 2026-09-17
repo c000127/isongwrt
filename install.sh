@@ -11,19 +11,19 @@ if [ ! -x /bin/opkg ] && [ ! -x /usr/bin/apk ]; then
 	exit 1
 fi
 
-fetch() { # <url> <outfile>
-	if command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -O "$2" "$1"
-	elif command -v curl >/dev/null 2>&1; then
-		curl -fsSL -o "$2" "$1"
-	else
-		wget -q -O "$2" "$1"
-	fi
+fetch() { # <url> <outfile>：依次尝试 curl / uclient-fetch / wget（有的系统 uclient-fetch 缺 libustream）
+	if command -v curl >/dev/null 2>&1 && curl -fsSL --max-time 60 -o "$2" "$1"; then return 0; fi
+	if command -v uclient-fetch >/dev/null 2>&1 && uclient-fetch -q -O "$2" "$1"; then return 0; fi
+	if command -v wget >/dev/null 2>&1 && wget -q -T 60 -O "$2" "$1"; then return 0; fi
+	return 1
 }
 
 install_from_feed() {
 	feed_script=/tmp/isongwrt-feed.sh
-	fetch "https://raw.githubusercontent.com/$REPO/main/feed.sh" "$feed_script" 2>/dev/null || return 1
+	for base in https://cdn.jsdelivr.net/gh/$REPO@main https://fastly.jsdelivr.net/gh/$REPO@main https://raw.githubusercontent.com/$REPO/main; do
+		fetch "$base/feed.sh" "$feed_script" 2>/dev/null && break
+	done
+	[ -s "$feed_script" ] || return 1
 	sh "$feed_script" >/dev/null 2>&1 || return 1
 	if [ -x /bin/opkg ]; then
 		opkg install "$PKG"

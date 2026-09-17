@@ -1,7 +1,7 @@
 #!/bin/sh
 # isongwrt feed 添加脚本（OpenWrt 24.10 opkg / 25.x apk）
 # 用法：wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/feed.sh | sh
-# 可选环境变量：ISONGWRT_FEED_BASE 覆盖 feed 根地址（默认依次尝试 raw.githubusercontent / jsDelivr）
+# 可选环境变量：ISONGWRT_FEED_BASE 覆盖 feed 根地址（默认 jsDelivr → fastly → raw；raw 在部分网络不可达）
 set -e
 
 if [ ! -x /bin/opkg ] && [ ! -x /usr/bin/apk ]; then
@@ -20,17 +20,14 @@ case "${DISTRIB_RELEASE:-}" in
 		;;
 esac
 
-fetch() { # <url> <outfile>
-	if command -v uclient-fetch >/dev/null 2>&1; then
-		uclient-fetch -q -O "$2" "$1"
-	elif command -v curl >/dev/null 2>&1; then
-		curl -fsSL -o "$2" "$1"
-	else
-		wget -q -O "$2" "$1"
-	fi
+fetch() { # <url> <outfile>：依次尝试 curl / uclient-fetch / wget（有的系统 uclient-fetch 缺 libustream）
+	if command -v curl >/dev/null 2>&1 && curl -fsSL --max-time 60 -o "$2" "$1"; then return 0; fi
+	if command -v uclient-fetch >/dev/null 2>&1 && uclient-fetch -q -O "$2" "$1"; then return 0; fi
+	if command -v wget >/dev/null 2>&1 && wget -q -T 60 -O "$2" "$1"; then return 0; fi
+	return 1
 }
 
-FEED_BASES="${ISONGWRT_FEED_BASE:-https://raw.githubusercontent.com/c000127/isongwrt/feed https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed}"
+FEED_BASES="${ISONGWRT_FEED_BASE:-https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed https://fastly.jsdelivr.net/gh/c000127/isongwrt@feed https://raw.githubusercontent.com/c000127/isongwrt/feed}"
 
 feed_url=""
 for base in $FEED_BASES; do
