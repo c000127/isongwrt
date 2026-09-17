@@ -1,8 +1,21 @@
 #!/bin/sh
 # isongwrt feed 添加脚本（OpenWrt 24.10 opkg / 25.x apk）
 # 用法：wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/feed.sh | sh
-# 可选环境变量：ISONGWRT_FEED_BASE 覆盖 feed 根地址（默认 jsDelivr → fastly → raw；raw 在部分网络不可达）
+# 源选择（三选一，可交互选择或用参数/环境变量指定）：
+#   --source=mirror   镜像优先（默认）：jsDelivr → fastly.jsdelivr → GitHub 直连
+#   --source=direct   GitHub 直连优先：raw.githubusercontent → jsDelivr
+#   --source=custom   自定义：ISONGWRT_FEED_BASE（可多个，空格分隔）
+# 环境变量等价的 ISONGWRT_SOURCE；非交互（管道执行）时不会提问，直接按默认/环境变量。
 set -e
+
+SOURCE="${ISONGWRT_SOURCE:-}"
+for arg in "$@"; do
+	case "$arg" in
+		--source=*) SOURCE="${arg#--source=}" ;;
+		-d|--direct) SOURCE="direct" ;;
+		-m|--mirror) SOURCE="mirror" ;;
+	esac
+done
 
 if [ ! -x /bin/opkg ] && [ ! -x /usr/bin/apk ]; then
 	echo "错误：未找到 opkg 或 apk（仅支持 OpenWrt/iStoreOS）" >&2
@@ -27,7 +40,29 @@ fetch() { # <url> <outfile>：依次尝试 curl / uclient-fetch / wget（有的�
 	return 1
 }
 
-FEED_BASES="${ISONGWRT_FEED_BASE:-https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed https://fastly.jsdelivr.net/gh/c000127/isongwrt@feed https://raw.githubusercontent.com/c000127/isongwrt/feed}"
+JSD="https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed"
+JSD2="https://fastly.jsdelivr.net/gh/c000127/isongwrt@feed"
+RAW="https://raw.githubusercontent.com/c000127/isongwrt/feed"
+
+# 交互选择（仅在能从 /dev/tty 读取时询问，管道执行不受影响）
+if [ -z "$SOURCE" ] && [ -r /dev/tty ]; then
+	printf '请选择 feed 下载源：\n  1) 镜像优先 jsDelivr（推荐，国内可用）\n  2) GitHub 直连\n  3) 自定义（ISONGWRT_FEED_BASE）\n输入序号 [1]: ' > /dev/tty
+	if read -r _ans < /dev/tty 2>/dev/null; then
+		case "$_ans" in
+			2) SOURCE=direct ;;
+			3) SOURCE=custom ;;
+			*) SOURCE=mirror ;;
+		esac
+	fi
+fi
+SOURCE="${SOURCE:-mirror}"
+
+case "$SOURCE" in
+	direct) FEED_BASES="$RAW $JSD $JSD2" ;;
+	custom) FEED_BASES="${ISONGWRT_FEED_BASE:-$JSD}" ;;
+	*)      FEED_BASES="${ISONGWRT_FEED_BASE:-$JSD $JSD2 $RAW}" ;;
+esac
+echo "使用源：$SOURCE → $FEED_BASES"
 
 feed_url=""
 for base in $FEED_BASES; do
