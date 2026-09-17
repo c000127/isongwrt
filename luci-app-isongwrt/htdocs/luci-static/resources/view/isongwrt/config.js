@@ -7,157 +7,164 @@
 
 var UPLOAD_TMP = '/tmp/isongwrt-upload.json';
 
+function btn(label, style, fn) {
+	return E('button', { 'class': 'btn cbi-button cbi-button-' + style, 'click': fn }, label);
+}
+
+function row(title, field, desc) {
+	return E('div', { 'class': 'cbi-value' }, [
+		E('label', { 'class': 'cbi-value-title' }, title),
+		E('div', { 'class': 'cbi-value-field' }, [
+			field,
+			desc ? E('div', { 'class': 'cbi-value-description' }, desc) : ''
+		])
+	]);
+}
+
 return view.extend({
 	load: function () {
-		return Promise.all([ iso.call(['config-list']), iso.call(['status']) ]);
+		return iso.call(['config-list']);
 	},
 
-	render: function (data) {
-		this.list = data[0] || {};
-		this.status = data[1] || {};
-		this.files = (this.list.files || []);
-		this.backups = (this.list.backups || []);
-		this.current = this.files.length ? this.files[0].name : '10-user';
-		this.content = '';
-		this.root = E('div', { 'class': 'cbi-map' });
+	render: function (list) {
 		var self = this;
-		return this.loadContent(this.current).then(function () {
-			self.paint();
-			return self.root;
-		});
-	},
+		self.list = list || {};
+		self.files = self.list.files || [];
+		self.backups = self.list.backups || [];
+		self.current = self.files.length ? self.files[0].name : '10-user';
+		self.content = '';
 
-	loadContent: function (name) {
-		var self = this;
-		return iso.call(['config-get', name]).then(function (r) {
-			self.content = r && r.ok ? (r.content || '') : '';
-			if (r && !r.ok) iso.notify(r, '读取配置失败');
-		});
-	},
+		self.editor = E('textarea', {
+			'class': 'cbi-input-textarea',
+			'style': 'width:100%;height:340px;font-family:monospace;box-sizing:border-box',
+			'spellcheck': 'false',
+			'input': function (ev) { self.content = ev.target.value; }
+		}, '');
 
-	paint: function () {
-		var self = this;
-		var fileOpts = this.files.map(function (f) {
-			return E('option', { 'value': f.name, 'selected': f.name === self.current ? '' : null },
-				f.name + '.json（' + f.size + ' B）');
-		});
-		var backupRows = this.backups.slice(0, 20).map(function (b) {
-			return E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left' }, b),
-				E('td', { 'class': 'td left' }, E('button', {
-					'class': 'btn cbi-button cbi-button-apply',
-					'click': ui.createHandlerFn(self, function () {
-						return iso.busy(iso.call(['config-restore', b]), '恢复备份…').then(function (r) {
-							iso.notify(r, '已恢复 ' + b);
-							return self.loadContent(self.current).then(function () { self.paint(); });
-						});
-					})
-				}, '恢复'))
-			]);
+		self.select = E('select', {
+			'class': 'cbi-input-select',
+			'change': function (ev) {
+				self.current = ev.target.value;
+				return self.loadContent().then(function () { self.editor.value = self.content; });
+			}
 		});
 
-		dom.content(this.root, [
-			E('h2', {}, '配置管理'),
-			E('div', { 'class': 'cbi-map-descr' },
-				'配置以「分片目录」方式加载：分片文件放入 conf 目录后由 sing-box 合并（-C 目录模式）。面板自动维护 90-isongwrt-api.json（API/面板分片），升级不会覆盖你的配置；保存前会自动 sing-box check 校验，未通过自动回退。'),
-			E('div', { 'class': 'cbi-section' }, [
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title' }, '分片文件'),
-					E('div', { 'class': 'cbi-value-field' }, [
-						E('select', {
-							'class': 'cbi-input-select',
-							'change': ui.createHandlerFn(this, function (ev) {
-								this.current = ev.target.value;
-								return this.loadContent(this.current).then(function () { self.paint(); });
-							})
-						}, fileOpts.concat([ E('option', { 'value': '__new__' }, '＋ 新建 10-user.json') ]))
-					])
-				]),
-				E('textarea', {
-					'class': 'cbi-input-textarea', 'style': 'width:100%;height:340px;font-family:monospace',
-					'spellcheck': 'false',
-					'input': ui.createHandlerFn(this, function (ev) { this.content = ev.target.value; })
-				}, this.content),
-				E('div', { 'class': 'cbi-page-actions' }, [
-					E('button', {
-						'class': 'btn cbi-button cbi-button-apply',
-						'click': ui.createHandlerFn(this, function () { return this.save(); })
-					}, '校验并保存'),
-					E('button', {
-						'class': 'btn cbi-button',
-						'click': ui.createHandlerFn(this, function () {
-							return iso.busy(iso.call(['check']), '校验配置…').then(function (r) {
-								iso.notify(r, '配置校验通过');
-							});
-						})
-					}, '仅校验'),
-					E('button', {
-						'class': 'btn cbi-button',
-						'click': ui.createHandlerFn(this, function () {
-							return iso.busy(iso.call(['service', 'restart']), '重启服务…').then(function (r) {
-								iso.notify(r, '服务已重启');
-							});
-						})
-					}, '重启服务'),
-					E('button', {
-						'class': 'btn cbi-button',
-						'click': ui.createHandlerFn(this, function () {
-							return iso.busy(iso.call(['config-backup']), '创建快照…').then(function (r) {
-								iso.notify(r, '快照已创建');
-								return iso.call(['config-list']).then(function (l) {
-									self.backups = (l && l.backups) || [];
-									self.paint();
+		self.backupBox = E('div', {});
+
+		function paintSelect() {
+			var opts = self.files.map(function (f) {
+				return E('option', { 'value': f.name, 'selected': f.name === self.current ? '' : null },
+					f.name + '.json（' + f.size + ' B）');
+			});
+			opts.push(E('option', { 'value': '__new__' }, '＋ 新建 10-user.json'));
+			dom.content(self.select, opts);
+		}
+
+		function paintBackups() {
+			if (!self.backups.length) {
+				dom.content(self.backupBox, E('em', {}, '暂无备份'));
+				return;
+			}
+			dom.content(self.backupBox, E('table', { 'class': 'table' },
+				self.backups.slice(0, 10).map(function (b) {
+					return E('tr', { 'class': 'tr' }, [
+						E('td', { 'class': 'td left' }, b),
+						E('td', { 'class': 'td right' }, btn('恢复', 'apply', function () {
+							return iso.busy(iso.call(['config-restore', b]), '恢复备份…').then(function (r) {
+								iso.notify(r, '已恢复 ' + b);
+								return self.loadContent().then(function () {
+									self.editor.value = self.content;
 								});
 							});
-						})
-					}, '创建快照'),
-					E('input', {
-						'type': 'file', 'accept': '.json', 'style': 'display:inline-block;margin-left:1em',
-						'change': ui.createHandlerFn(this, function (ev) { return this.upload(ev); })
-					})
-				])
-			]),
+						}))
+					]);
+				})));
+		}
+
+		paintSelect();
+		paintBackups();
+		self.loadContent().then(function () { self.editor.value = self.content; });
+
+		return E('div', { 'class': 'cbi-map' }, [
+			E('h2', {}, '配置管理'),
+			E('div', { 'class': 'cbi-map-descr' },
+				'配置按分片目录加载（sing-box -C）：面板只维护 90-isongwrt-api.json，不会覆盖你的配置；保存前自动校验，失败自动回退。'),
+
 			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, '备份（最近 20 条）'),
-				E('table', { 'class': 'table' }, [
-					E('tr', { 'class': 'tr table-titles' }, [
-						E('th', { 'class': 'th' }, '备份文件'), E('th', { 'class': 'th' }, '操作')
-					])
-				].concat(backupRows.length ? backupRows
-					: [ E('tr', { 'class': 'tr' }, [ E('td', { 'class': 'td', 'colspan': 2 }, '暂无备份') ]) ]))
+				row('分片文件', self.select),
+				row('操作', E('div', {}, [
+					btn('校验并保存', 'apply', function () { return self.save(); }),
+					' ',
+					btn('创建快照', 'action', function () {
+						return iso.busy(iso.call(['config-backup']), '创建快照…').then(function (r) {
+							iso.notify(r, '快照已创建');
+							return iso.call(['config-list']).then(function (l) {
+								self.backups = (l && l.backups) || [];
+								paintBackups();
+							});
+						});
+					}),
+					' ',
+					E('input', {
+						'type': 'file', 'accept': '.json',
+						'style': 'display:inline-block;vertical-align:middle',
+						'change': function (ev) { return self.upload(ev); }
+					})
+				])),
+				row('内容', self.editor)
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, '备份（最近 10 条）'),
+				self.backupBox
 			])
 		]);
 	},
 
+	loadContent: function () {
+		var self = this;
+		var name = self.current === '__new__' ? '10-user' : self.current;
+		return iso.call(['config-get', name]).then(function (r) {
+			self.content = (r && r.ok) ? (r.content || '') : '';
+			if (r && !r.ok) iso.notify(r, '');
+		});
+	},
+
 	save: function () {
-		var self = this, name = this.current === '__new__' ? '10-user' : this.current;
-		return fs.write(UPLOAD_TMP, this.content).then(function () {
+		var self = this;
+		var name = self.current === '__new__' ? '10-user' : self.current;
+		return fs.write(UPLOAD_TMP, self.content).then(function () {
 			return iso.busy(iso.call(['config-save', name]), '校验并保存…');
 		}).then(function (r) {
 			iso.notify(r, '已保存 ' + name + '.json');
 			self.current = name;
 			return iso.call(['config-list']).then(function (l) {
-				self.list = l || {};
 				self.files = (l && l.files) || [];
 				self.backups = (l && l.backups) || [];
-				self.paint();
+				dom.content(self.select, self.files.map(function (f) {
+					return E('option', { 'value': f.name, 'selected': f.name === name ? '' : null },
+						f.name + '.json（' + f.size + ' B）');
+				}).concat([ E('option', { 'value': '__new__' }, '＋ 新建 10-user.json') ]));
+				var box = document.querySelector('#iso-backups');
+				if (box) dom.content(box, E([]));
 			});
 		});
 	},
 
 	upload: function (ev) {
-		var self = this, file = ev.target.files && ev.target.files[0];
+		var self = this;
+		var file = ev.target.files && ev.target.files[0];
 		if (!file) return Promise.resolve();
 		return new Promise(function (resolve, reject) {
 			var reader = new FileReader();
-			reader.onload = function () {
-				self.content = String(reader.result);
-				self.current = '10-user';
-				resolve();
-			};
+			reader.onload = function () { self.content = String(reader.result); resolve(); };
 			reader.onerror = reject;
 			reader.readAsText(file);
-		}).then(function () { return self.save(); });
+		}).then(function () {
+			self.current = '10-user';
+			self.editor.value = self.content;
+			return self.save();
+		});
 	},
 
 	handleSave: null,
