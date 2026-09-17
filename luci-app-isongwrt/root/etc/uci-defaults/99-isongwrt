@@ -1,0 +1,25 @@
+#!/bin/sh
+# isongwrt 首次安装初始化
+mkdir -p /etc/isongwrt/conf /etc/isongwrt/installed /etc/isongwrt/backups
+
+# 无配置时放置最小可用模板（可直接在面板里上传替换）
+if ! ls /etc/isongwrt/conf/*.json >/dev/null 2>&1; then
+	cat > /etc/isongwrt/conf/10-user.json <<'SAMPLE'
+{
+  "log": { "level": "info", "timestamp": true },
+  "dns": {
+    "servers": [ { "type": "local", "tag": "dns-local" } ],
+    "final": "dns-local"
+  },
+  "inbounds": [
+    { "type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"],
+      "auto_route": true, "strict_route": true }
+  ],
+  "outbounds": [ { "type": "direct", "tag": "direct" } ],
+  "route": { "final": "direct" }
+}
+SAMPLE
+fi
+
+/usr/lib/isongwrt/ctl api-sync >/dev/null 2>&1
+exit 0

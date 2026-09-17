@@ -1,0 +1,50 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'luci-app-isongwrt/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}-${{ matrix.branch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - x86_64
+          - aarch64_cortex-a53
+          - aarch64_generic
+          - arm_cortex-a7_neon-vfpv4
+          - arm_cortex-a9
+          - mipsel_24kc
+          - riscv64_generic
+        branch:
+          - openwrt-24.10
+          - openwrt-25.12
+          - SNAPSHOT
+        exclude:
+          - arch: riscv64_generic
+            branch: openwrt-24.10
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+
+      - name: build
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}-${{ matrix.branch }}
+          FEEDNAME: isongwrt
+          PACKAGES: luci-app-isongwrt
+          NO_REFRESH_CHECK: true
+
+      - name: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: isongwrt_${{ matrix.arch }}-${{ matrix.branch }}
+          path: bin/packages/${{ matrix.arch }}/isongwrt
