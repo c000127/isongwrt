@@ -1,16 +1,25 @@
 'use strict';
+'require baseclass';
 'require fs';
 'require uci';
+'require ui';
 
 var CTL = '/usr/lib/isongwrt/ctl';
 
+/* 调用后端脚本（/usr/lib/isongwrt/ctl），返回解析后的 JSON */
 function call(args) {
 	return fs.exec(CTL, args || []).then(function (res) {
 		var out = ((res && res.stdout) || '').trim();
 		var err = ((res && res.stderr) || '').trim();
-		function tryParse(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+
+		function tryParse(s) {
+			try { return JSON.parse(s); } catch (e) { return null; }
+		}
+
 		var parsed = tryParse(out) || tryParse(err);
-		if (parsed) return parsed;
+		if (parsed)
+			return parsed;
+
 		return { ok: false, error: out || err || '空输出' };
 	}).catch(function (e) {
 		return { ok: false, error: (e && e.message) || String(e) };
@@ -31,9 +40,7 @@ function set(opt, val) {
 }
 
 function applyUci() {
-	return uci.save().then(function () {
-		return uci.apply();
-	});
+	return uci.save().then(function () { return uci.apply(); });
 }
 
 function notify(res, okMsg) {
@@ -45,8 +52,7 @@ function notify(res, okMsg) {
 }
 
 function busy(promise, msg) {
-	var node = E('p', { 'class': 'spinning' }, msg || '处理中…');
-	ui.showModal('请稍候', [node]);
+	ui.showModal('请稍候', [ E('p', { 'class': 'spinning' }, msg || '处理中…') ]);
 	return promise.then(function (r) {
 		ui.hideModal();
 		return r;
@@ -56,7 +62,8 @@ function busy(promise, msg) {
 	});
 }
 
-return {
+/* LuCI 模块必须返回 class（loader 会 new 它），故用 baseclass.extend */
+return baseclass.extend({
 	call: call,
 	loadUci: loadUci,
 	get: get,
@@ -64,4 +71,4 @@ return {
 	applyUci: applyUci,
 	notify: notify,
 	busy: busy
-};
+});
