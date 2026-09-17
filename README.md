@@ -18,7 +18,8 @@ OpenWrt / iStoreOS 上的 **sing-box 轻量管理面板**（LuCI 应用）。
 
 - **OpenWrt 24.10（opkg / .ipk）** 与 **OpenWrt 25.x（apk / .apk）**：同一套源码，由 SDK 按分支自动产出对应格式。
 - iStoreOS 25.x（apk-tools 3）实测可用。
-- 架构：x86_64 / aarch64 / armv7 / armv6 / mips(el) / riscv64 / loongarch64（内核资产按表映射）。
+- 架构：内核管理器支持 x86_64 / aarch64 / armv7 / armv6 / mips(el) / riscv64 / loongarch64（按表映射到官方资产，优先 musl）；
+  **CI 默认只出 x86_64 包**（24.10/25.12），其它架构按需在矩阵里开启。
 
 ## 安装
 
@@ -51,8 +52,9 @@ make package/luci-app-isongwrt/compile V=s
 
 ### 方式三：GitHub Actions 自动构建
 
-`.github/workflows/build.yml` 已配置矩阵构建（`openwrt-24.10` / `openwrt-25.12` / `SNAPSHOT` × 常用架构），
+`.github/workflows/build.yml` 默认只构建**当前需要的目标**：`x86_64` × {`openwrt-24.10`(ipk), `openwrt-25.12`(apk)}，
 推送到 `main` 或手动 `workflow_dispatch` 触发，产物在 Actions Artifacts 中。
+需要其它架构/分支（如 `aarch64_cortex-a53`、`SNAPSHOT`）时，往矩阵的 `arch` / `branch` 列表里加一行即可。
 
 ## 使用
 
