@@ -71,7 +71,21 @@ apk add luci-app-isongwrt-*.apk                 # 25.x
 
 装完刷新 LuCI（`/etc/init.d/uhttpd restart`），菜单：**服务 → isongwrt**。仅依赖 `ca-bundle`（下载走系统自带 `uclient-fetch`，无需 curl）。
 
-### C. 自行编译
+### 服务端（落地机）部署
+
+仓库同时提供**服务端一键部署脚本**（在境外落地机部署 sing-box 服务端，配合本面板托管的路由器/手机客户端）：
+
+```bash
+# 交互式选源（直连 GitHub / 加速前缀）
+bash server/singbox-deploy.sh install
+```
+
+- 内核一律使用**官方 Release 原样二进制**（不改名、不自编译），安装为 `/usr/local/bin/sing-box`
+- ss2022（`2022-blake3-aes-256-gcm`）+ `multiplex(h2mux)+padding`，与客户端配置对齐；**无 TLS**
+- 支持 `--with-smartdns`、`--source auto|direct|mirror`、`--dry-run`、`upgrade/rollback/uninstall`
+- 详见 **[server/README.md](server/README.md)**
+
+## C. 自行编译
 
 ```sh
 echo "src-git isongwrt https://github.com/c000127/isongwrt.git" >> feeds.conf.default
