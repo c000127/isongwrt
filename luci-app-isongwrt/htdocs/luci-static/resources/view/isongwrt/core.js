@@ -38,37 +38,87 @@ return view.extend({
 
 		function paintLatest() {
 			if (!self.channels) {
-				dom.content(self.latestInner, E('em', {}, '未检查（点「检查更新」获取官方 Releases 最新版）'));
+				dom.content(self.latestInner, E('div', {}, [
+					E('em', {}, '尚未检查。'),
+					E('div', { 'class': 'cbi-value-description' },
+						'点上方「检查更新」从官方 Releases（SagerNet/sing-box）读取各渠道最新版本与更新状态。')
+				]));
 				return;
 			}
-			dom.content(self.latestInner, E('div', {}, self.channels.map(function (c, i) {
-				return [ i ? ' · ' : '', E('strong', {}, c.name), ' ', c.latest || '—' ];
-			}).reduce(function (a, b) { return a.concat(b); }, [])));
+			var active = (self.installed || {}).active || '';
+			var rows = [ E('tr', { 'class': 'tr table-titles' }, [
+				E('th', { 'class': 'th' }, '渠道'),
+				E('th', { 'class': 'th' }, '最新版本'),
+				E('th', { 'class': 'th' }, '状态')
+			]) ];
+			self.channels.forEach(function (c) {
+				var latest = c.latest || '';
+				var state;
+				if (!latest)
+					state = E('span', { 'class': 'cbi-value-description' }, '该渠道近期无版本（可用「指定版本」直接填 tag）');
+				else if (active && latest.replace(/^v/, '') === active)
+					state = E('span', { 'style': 'color:green' }, '已安装');
+				else if (active)
+					state = E('span', {}, '有更新');
+				else
+					state = E('span', { 'class': 'cbi-value-description' }, '未安装');
+				rows.push(E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left' }, E('strong', {}, c.name)),
+					E('td', { 'class': 'td left' }, latest || '—'),
+					E('td', { 'class': 'td left' }, state)
+				]));
+			});
+			dom.content(self.latestInner, E('div', {}, [
+				E('table', { 'class': 'table' }, rows),
+				E('div', { 'class': 'cbi-value-description' },
+					'来源：官方 Releases；安装按上方「渠道」选择执行（点「安装 / 升级」时会自动先保存设置）。')
+			]));
 		}
 
 		function installedTable() {
 			var versions = (self.installed.versions || []);
 			if (!versions.length)
-				return E('em', {}, '尚未安装');
-			return E('table', { 'class': 'table' },
-				versions.map(function (v) {
-					var isActive = (v.version === self.installed.active);
-					return E('tr', { 'class': 'tr' }, [
-						E('td', { 'class': 'td left' }, v.version + (isActive ? ' ★' : '')),
-						E('td', { 'class': 'td left' }, v.size ? (Math.round(v.size / 1048576 * 10) / 10) + ' MiB' : '—'),
-						E('td', { 'class': 'td left' }, [
-							isActive ? E('em', {}, '当前激活') : btn('激活', 'apply', function () {
-								return iso.busy(iso.call(['activate', v.version]), '切换内核…').then(function (r) {
-									iso.notify(r, '已切换到 ' + v.version);
-									return reload();
-								});
-							}),
-							isActive ? '' : ' ',
-							btn('删除', 'remove', function () { return doRemove(v.version, isActive); }),
-							(isActive && (self.installed.versions || []).length > 1) ? '' : ''
-						])
-					]);
-				}));
+				return E('div', {}, [
+					E('em', {}, '尚未安装内核。'),
+					E('div', { 'class': 'cbi-value-description' },
+						'点上方「安装 / 升级」从官方 Releases 下载安装（视网络约 30–90 MB）；也可在「配置管理」中导入配置。')
+				]);
+
+			var rows = [ E('tr', { 'class': 'tr table-titles' }, [
+				E('th', { 'class': 'th' }, '版本'),
+				E('th', { 'class': 'th' }, '大小'),
+				E('th', { 'class': 'th' }, '操作')
+			]) ];
+
+			versions.forEach(function (v) {
+				var isActive = (v.version === self.installed.active);
+				var actions = [];
+				if (isActive) {
+					actions.push(E('em', {}, '当前激活'));
+				} else {
+					actions.push(btn('激活', 'apply', function () {
+						return iso.busy(iso.call([ 'activate', v.version ]), '切换内核…').then(function (r) {
+							iso.notify(r, '已切换到 ' + v.version);
+							return reload();
+						});
+					}), ' ');
+				}
+				actions.push(btn('删除', 'remove', function () { return doRemove(v.version, isActive); }));
+
+				rows.push(E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left' }, v.version + (isActive ? ' ★' : '')),
+					E('td', { 'class': 'td left' }, v.size ? (Math.round(v.size / 1048576 * 10) / 10) + ' MiB' : '—'),
+					E('td', { 'class': 'td left' }, actions)
+				]));
+			});
+
+			rows.push(E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td left', 'colspan': 3 },
+					E('div', { 'class': 'cbi-value-description' },
+						'★ = 当前激活；「激活」立即切换并重启服务；删除当前激活版本会先确认（若还有其它版本，将自动切换到其中最新的一版）。'))
+			]));
+
+			return E('table', { 'class': 'table' }, rows);
 		}
 
 		function paintInstalled() {
