@@ -40,7 +40,7 @@ return view.extend({
 			if (!self.channels) {
 				dom.content(self.latestInner, E('div', {}, [
 					E('em', {}, '尚未检查。'),
-					E('div', { 'class': 'cbi-value-description' },
+					E('div', { 'class': 'cbi-section-descr' },
 						'点上方「检查更新」从官方 Releases（SagerNet/sing-box）读取各渠道最新版本与更新状态。')
 				]));
 				return;
@@ -55,13 +55,13 @@ return view.extend({
 				var latest = c.latest || '';
 				var state;
 				if (!latest)
-					state = E('span', { 'class': 'cbi-value-description' }, '该渠道近期无版本（可用「指定版本」直接填 tag）');
+					state = E('span', { 'style': 'color:#888' }, '该渠道近期无版本（可用「指定版本」直接填 tag）');
 				else if (active && latest.replace(/^v/, '') === active)
 					state = E('span', { 'style': 'color:green' }, '已安装');
 				else if (active)
 					state = E('span', {}, '有更新');
 				else
-					state = E('span', { 'class': 'cbi-value-description' }, '未安装');
+					state = E('span', { 'style': 'color:#888' }, '未安装');
 				rows.push(E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left' }, E('strong', {}, c.name)),
 					E('td', { 'class': 'td left' }, latest || '—'),
@@ -70,7 +70,7 @@ return view.extend({
 			});
 			dom.content(self.latestInner, E('div', {}, [
 				E('table', { 'class': 'table' }, rows),
-				E('div', { 'class': 'cbi-value-description' },
+				E('div', { 'class': 'cbi-section-descr' },
 					'来源：官方 Releases；安装按上方「渠道」选择执行（点「安装 / 升级」时会自动先保存设置）。')
 			]));
 		}
@@ -80,7 +80,7 @@ return view.extend({
 			if (!versions.length)
 				return E('div', {}, [
 					E('em', {}, '尚未安装内核。'),
-					E('div', { 'class': 'cbi-value-description' },
+					E('div', { 'class': 'cbi-section-descr' },
 						'点上方「安装 / 升级」从官方 Releases 下载安装（视网络约 30–90 MB）；也可在「配置管理」中导入配置。')
 				]);
 
@@ -112,13 +112,11 @@ return view.extend({
 				]));
 			});
 
-			rows.push(E('tr', { 'class': 'tr' }, [
-				E('td', { 'class': 'td left', 'colspan': 3 },
-					E('div', { 'class': 'cbi-value-description' },
-						'★ = 当前激活；「激活」立即切换并重启服务；删除当前激活版本会先确认（若还有其它版本，将自动切换到其中最新的一版）。'))
-			]));
-
-			return E('table', { 'class': 'table' }, rows);
+			return E('div', {}, [
+				E('table', { 'class': 'table' }, rows),
+				E('div', { 'class': 'cbi-section-descr' },
+					'★ = 当前激活；「激活」立即切换并重启服务；删除当前激活版本会先确认（若还有其它版本，将自动切换到其中最新的一版）。')
+			]);
 		}
 
 		function paintInstalled() {
