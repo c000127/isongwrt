@@ -70,7 +70,9 @@ return view.extend({
 
 		m = new form.Map('isongwrt', 'isongwrt', 'sing-box 内核管理与配置面板。');
 
-		s = m.section(form.TableSection, 'status', '状态');
+		/* 用 NamedSection（指向已存在的 main 段）→ 每个项目独占一行，纵向显示；
+		   TableSection 会把选项当“列”渲染成横向表头，故不适用。 */
+		s = m.section(form.NamedSection, 'main', 'isongwrt', '状态');
 		s.anonymous = true;
 
 		o = s.option(form.DummyValue, '_running', '运行状态');
