@@ -3,6 +3,7 @@
 'require form';
 'require dom';
 'require ui';
+'require uci';
 'require tools.isongwrt as iso';
 
 var CHANNELS = [ 'stable', 'rc', 'beta', 'alpha' ];
@@ -97,9 +98,44 @@ return view.extend({
 			});
 		}
 
+		/* 读取表单控件的“实时值”（section_id='main'，见 form.NamedSection），
+		   避免“改了渠道但没保存并应用”时仍按旧值安装 */
+		function liveValue(opt) {
+			try {
+				var v = opt && opt.formvalue('main');
+				if (v !== null && v !== undefined && v !== '')
+					return v;
+			} catch (e) { /* 忽略：回退到已保存值 */ }
+			return null;
+		}
+
+		function currentChannel() {
+			var v = liveValue(channelOpt);
+			return (v != null) ? v : iso.get('channel', 'stable');
+		}
+
+		function currentPin() {
+			var v = liveValue(pinOpt);
+			return ((v != null) ? v : (iso.get('pin_version', '') || '')).trim();
+		}
+
+		/* 把当前表单提交到 UCI（等价「保存并应用」中的提交动作；失败时回退实时值） */
+		function persistSettings() {
+			var prep = Promise.resolve();
+			try {
+				if (typeof self.handleSave === 'function')
+					prep = Promise.resolve(self.handleSave(null)).then(function () { return uci.apply(); });
+			} catch (e) { prep = Promise.resolve(); }
+			return prep.catch(function () { /* 忽略，用实时控件值兜底 */ });
+		}
+
 		function install() {
-			var ch = iso.get('channel', 'stable');
-			var pin = (iso.get('pin_version', '') || '').trim();
+			return persistSettings().then(function () { return doInstall(); });
+		}
+
+		function doInstall() {
+			var ch = currentChannel();
+			var pin = currentPin();
 			var label = pin || (ch + ' 渠道最新版');
 			var pre = E('pre', {
 				'style': 'max-height:40vh;overflow:auto;white-space:pre-wrap;font-size:12px;background:#111;color:#ddd;padding:8px'
@@ -136,7 +172,7 @@ return view.extend({
 
 		/* ---- 表单：仅设置项 ---- */
 		m = new form.Map('isongwrt', '内核管理',
-			'内核取自官方 Releases（SagerNet/sing-box），按本机架构自动匹配、优先 musl 构建；本项目不编译内核。设置改动请先「保存并应用」。');
+			'内核取自官方 Releases（SagerNet/sing-box），按本机架构自动匹配、优先 musl 构建；本项目不编译内核。点「安装 / 升级」会自动先保存当前设置。');
 
 		s = m.section(form.NamedSection, 'main', 'isongwrt', '安装设置');
 		s.anonymous = true;
@@ -144,9 +180,11 @@ return view.extend({
 		o = s.option(form.ListValue, 'channel', '渠道');
 		CHANNELS.forEach(function (c) { o.value(c, c); });
 		o.default = 'stable';
+		var channelOpt = o;
 
 		o = s.option(form.Value, 'pin_version', '指定版本',
 			'留空 = 渠道最新；也可填精确 tag，如 v1.15.0-alpha.5。');
+		var pinOpt = o;
 
 		o = s.option(form.Value, 'github_proxy', '加速前缀',
 			'留空 = 直连 github.com；受限网络可填如 https://ghfast.top/');
