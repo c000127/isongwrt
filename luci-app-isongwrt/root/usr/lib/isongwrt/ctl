@@ -343,6 +343,97 @@ do_install_status() {
 	printf '"}\n'
 }
 
+# 为配置里的 remote rule_set 注入 download_detour（解决国内直连 GitHub 下载失败导致启动失败）
+# 用法：conf-fix-remote <name> [outbound-tag]
+do_conf_fix_remote() {
+	_name="$1"; _tag="${2:-}"
+	case "$_name" in */*|*..*) die "非法文件名";; esac
+	_f="$CONF_DIR/$_name.json"
+	[ -f "$_f" ] || die "配置文件不存在：$_name.json"
+
+	_n_remote=$(grep -c '"type": "remote"' "$_f" 2>/dev/null || echo 0)
+	[ "$_n_remote" -gt 0 ] || die "该配置没有 remote 类型的 rule_set，无需修复"
+	_n_detour=$(grep -c 'download_detour' "$_f" 2>/dev/null || echo 0)
+	[ "$_n_detour" -ge "$_n_remote" ] && die "已全部包含 download_detour（$_n_detour/$_n_remote），无需修复"
+
+	# 新版写法：http_clients 里定义带 detour 的客户端，rule_set 用 http_client 引用；
+	# 若配置里已有 http_clients（不便自动改写数组），退回旧的 download_detour（可用但会告警）
+	_modern=1
+	grep -q '"http_clients"' "$_f" && _modern=0
+
+	# 推断代理出站：参数 → route.final（若为代理）→ 第一个非直连出站
+	if [ -z "$_tag" ]; then
+		_tag=$(grep -o '"final": "[^"]*"' "$_f" | tail -1 | sed 's/.*: "//; s/"$//')
+		case "$_tag" in ""|direct|DIRECT) _tag="" ;; esac
+	fi
+	if [ -z "$_tag" ]; then
+		_tag=$(grep -o '"tag": "[^"]*"' "$_f" | sed 's/.*: "//; s/"$//' | grep -viE '^(direct|DIRECT|block|dns-|.*-in|mixed-in)$' | head -1)
+	fi
+	[ -n "$_tag" ] || die "未找到可用作下载代理的出站，请指定：conf-fix-remote $_name <出站标签>"
+
+	init_dirs
+	_bak="$BACKUP_DIR/${_name}-detour-$(date +%Y%m%d-%H%M%S).json"
+	mkdir -p "$BACKUP_DIR"; cp "$_f" "$_bak" || die "备份失败"
+
+	# 逐行插入（保持缩进与注释不动）
+	if [ "$_modern" = "1" ]; then
+		# 1) 顶层插入 http_clients 定义（放在 route 之前）
+		awk -v tag="$_tag" '
+			BEGIN { done = 0 }
+			{
+				if (done == 0 && $0 ~ /^  "route"[ ]*:[ ]*\{/) {
+					print "  \"http_clients\": [ { \"tag\": \"isongwrt-download\", \"detour\": \"" tag "\" } ],"
+					done = 1
+				}
+				print
+			}
+			END {
+				if (done == 0) exit 3
+			}
+		' "$_f" > "$_f.new" || { rm -f "$_f.new"; _modern=0; }
+		[ "$_modern" = "1" ] && mv "$_f.new" "$_f"
+		# 2) 给缺引用字段的 remote rule_set 补 http_client
+		awk -v key='"http_client"' '
+			BEGIN { pending = 0 }
+			{
+				if (pending == 1) {
+					if ($0 ~ /http_client|download_detour/) { print; pending = 0; next }
+					print indent key ": \"isongwrt-download\","
+					pending = 0; print; next
+				}
+				print
+				if ($0 ~ /"type": *"remote",/) {
+					match($0, /^[ \t]*/); indent = substr($0, 1, RLENGTH); pending = 1
+				}
+			}
+		' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+	fi
+	if [ "$_modern" = "0" ]; then
+		# 回退：旧的 download_detour（sing-box 会给出弃用告警，但功能正常）
+		awk -v tag="$_tag" '
+			BEGIN { pending = 0 }
+			{
+				if (pending == 1) {
+					if ($0 ~ /download_detour/) { print; pending = 0; next }
+					print indent "\"download_detour\": \"" tag "\","
+					pending = 0; print; next
+				}
+				print
+				if ($0 ~ /"type": *"remote",/) {
+					match($0, /^[ \t]*/); indent = substr($0, 1, RLENGTH); pending = 1
+				}
+			}
+		' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+	fi
+
+	if _e=$(CONF_CHECK 2>&1); then
+		ok ",\"patched\":\"$_name.json\",\"detour\":\""$_tag"\",\"backup\":\"$(json_esc "$_bak")\""
+	else
+		cp "$_bak" "$_f"
+		die "注入后配置校验失败，已回滚：$(printf '%s' "$_e" | tail -2 | tr '\n' ' ')"
+	fi
+}
+
 # ---------- 配置管理 ----------
 CONF_CHECK() { # 返回 0/1，并输出错误文本
 	if [ ! -x "$CORE_PATH" ]; then
@@ -594,6 +685,7 @@ case "${1:-status}" in
 	config-get)     do_config_get "${2:?}" ;;
 	config-save)    do_config_save "${2:?}" "${3:-}" ;;
 	config-restore) do_config_restore "${2:?}" ;;
+	conf-fix-remote) do_conf_fix_remote "${2:?}" "${3:-}" ;;
 	config-backup)  mkdir -p "$BACKUP_DIR"; _d="$BACKUP_DIR/snapshot-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$_d"; cp "$CONF_DIR"/*.json "$_d/" 2>/dev/null; ok ",\"snapshot\":\"$(json_esc "$_d")\"" ;;
 	api-sync)    do_api_sync ;;
 	api-secret-new) do_api_secret_new ;;
@@ -601,13 +693,35 @@ case "${1:-status}" in
 	log)         do_log "${2:-200}" ;;
 	service)     case "${2:-}" in
 			start|stop|restart)
-				/etc/init.d/isongwrt "$2" >/dev/null 2>&1 || die "服务操作失败：$2"
+				# 标记为手动启动（不受 UCI enabled=0 限制）
+				ISONGWRT_MANUAL_START=1 /etc/init.d/isongwrt "$2" >/dev/null 2>&1 || die "服务操作失败：$2"
+				if [ "$2" = "stop" ] || [ "$2" = "restart" ]; then
+					# procd 优雅退出最长 5s，等待进程真正结束再回报
+					_j=0
+					while [ "$_j" -lt 6 ] && pgrep -f "$CORE_PATH run" >/dev/null 2>&1; do
+						sleep 1; _j=$((_j + 1))
+					done
+					pkill -f "$CORE_PATH run" >/dev/null 2>&1
+				fi
 				case "$2" in
 					start|restart)
-						sleep 2
+						# 规则集/面板资源可能需要下载，最多等 8 秒
+						_i=0
+						while [ "$_i" -lt 4 ]; do
+							pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && break
+							sleep 2; _i=$((_i + 1))
+						done
 						if ! pgrep -f "$CORE_PATH run" >/dev/null 2>&1; then
-							_err=$(logread 2>/dev/null | grep -iE 'sing-box|isongwrt' | tail -2 | sed 's/.*sing-box\[[0-9]*\]: //' | tr '\n' ' ')
-							die "服务未能启动：${_err:-未知原因（检查配置与端口占用）}"
+							# 只取真正的失败原因：优先 FATAL/ERROR，跳过 INFO 噪音
+							_err=$(logread 2>/dev/null | grep -iE 'sing-box\[[0-9]+\]' | grep -iE 'FATAL|ERROR' | tail -2 | sed 's/.*sing-box\[[0-9]*\]: //' | tr '\n' ' ')
+							_hint=""
+							if printf '%s' "$_err" | grep -qiE 'address already in use|bind:'; then
+								_hint="（端口被占用：请到「面板」页改用其它 API 端口，并检查入站端口是否与 mihomo 等冲突）"
+							elif printf '%s' "$_err" | grep -qiE 'download|http2|rule.?set'; then
+								_hint="（疑似远端规则集下载失败：可在「配置管理」点「规则集走代理」为 rule_set 指定下载走代理）"
+							fi
+							[ -n "$_err" ] || _err="未发现 FATAL/ERROR 日志；请检查「开机自启」是否关闭、配置是否为空、内核是否已安装"
+							die "服务未能启动：${_err}${_hint}"
 						fi ;;
 				esac
 				ok ",\"action\":\"$2\"" ;;
