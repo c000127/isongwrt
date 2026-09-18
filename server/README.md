@@ -18,7 +18,7 @@
 | 多路复用 | `multiplex: {enabled, padding}` 服务端开启 | 与客户端 `h2mux + padding` 对齐 |
 | TLS | **不使用** | 按既定裁决：ss2022 自身加密即可，减少握手与特征 |
 | 路由 | 默认 `direct`，拦 `bittorrent` / 广告域名 / 私有地址 / `geoip-cn` | 防止落地机被当作回国中转，减少滥用面 |
-| DNS | 默认 `8.8.8.8` + `1.1.1.1`；可选 smartdns | `--with-smartdns` 时监听 `127.0.0.1:6053`，**避开 53 端口冲突** |
+| DNS | 默认 `8.8.8.8` + `1.1.1.1`；可选 smartdns | `--with-smartdns` 时监听 `127.0.0.1:6053`，**避开 53 端口冲突**；见 §5.1 |
 | 幂等 | 密钥已存在即复用（不轮换） | 重复运行安全；改配置也不会换密钥 |
 | 可回滚 | `rollback` 子命令 + `${BIN}.prev` + 配置备份 | 升级/改动前自动备份 |
 | 可审计 | `/var/lib/isongwrt/deploy-record.json` | 版本、产物名、二进制/配置 sha256、端口、时间 |
@@ -112,6 +112,26 @@ journalctl -u sing-box -n 50 --no-pager | grep -E 'FATAL|ERROR'
 | `02_outbounds.json` | `direct` / `block` | 落地机不需要复杂出站 |
 | `03_route.json` | `sniff` → 拦 BT → 拦广告域名 → 拦私有地址 → `resolve` → 拦 `geoip-cn`；`final=direct` | 含 `http_clients` + `default_http_client`（1.14+ 下载规则集必需） |
 | `04_dns.json` | 默认 `8.8.8.8`/`1.1.1.1`；`--with-smartdns` 时为 `127.0.0.1:6053` | 与 `route.default_domain_resolver` 对应 |
+
+### 5.1 `--with-smartdns` 会改哪些文件（与 apt 原样配置的关系）
+
+`apt install smartdns` 下来的 `/etc/smartdns/smartdns.conf` 是**发行版 conffile**（400+ 行里只有 2~3 行生效：
+`bind [::]:53`、`log-level info`，Debian 另加 `force-qtype-SOA 65`；**没有任何 `server` 上游**）。
+本脚本**不改动它**，而是：
+
+| 文件 | 变化 | 说明 |
+|---|---|---|
+| `/etc/smartdns/isongwrt.conf` | **新建**（我们的配置） | `bind 127.0.0.1:6053`（只回环 + 非 53）、`bind-tcp` 同端口、`speed-check-mode ping,tcp:80,tcp:443`、`cache-size 4096`、`prefetch-domain yes`、`serve-expired yes`、上游 `1.1.1.1/8.8.8.8/9.9.9.9`（`--smartdns-upstreams` 可改） |
+| `/etc/default/smartdns` | **修改一行** | 设为 `SMART_DNS_OPTS="-c /etc/smartdns/isongwrt.conf"`；原文件首次备份为 `.isongwrt-orig` |
+| `/etc/smartdns/smartdns.conf` | **不动** | 发行版文件保持原样（升级不产生 conffile 冲突，文档注释也保留） |
+
+> 为什么用 `/etc/default/smartdns` 而不是 systemd drop-in？单元里是
+> `ExecStart=/usr/sbin/smartdns -p /run/smartdns.pid $SMART_DNS_OPTS` + `EnvironmentFile=/etc/default/smartdns`，
+> 而 **EnvironmentFile 的优先级高于 drop-in 的 `Environment=`**（实测：drop-in 会被空值覆盖，进程实参里没有 `-c`）。
+> 另外注意：`Environment=` 的值含空格时必须整体加引号，否则 systemd 会把 `-c` 与路径当成两个赋值。
+
+**顺带的安全收益**：发行版默认的 `bind [::]:53` 不再生效 → 既不会与 `systemd-resolved`/`dnsmasq` 抢 53，
+也不会把 smartdns 暴露成公网开放解析器（开放解析器会被用于 DNS 放大攻击）。
 
 权限：目录 `750`、配置文件 `640`（属主 `root:sing-box`）、密钥与部署记录 `600`。
 
