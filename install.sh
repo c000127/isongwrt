@@ -15,11 +15,18 @@ for arg in "$@"; do
 		-m|--mirror) SOURCE="mirror" ;;
 	esac
 done
-if [ -z "$SOURCE" ] && [ -r /dev/tty ]; then
-	printf 'Select download source:\n  1) jsDelivr mirror (default)\n  2) GitHub direct\n  3) custom (ISONGWRT_FEED_BASE / ISONGWRT_GH_PROXY)\nNumber [1]: ' > /dev/tty
-	if read -r _ans < /dev/tty 2>/dev/null; then
-		case "$_ans" in 2) SOURCE=direct ;; 3) SOURCE=custom ;; *) SOURCE=mirror ;; esac
-	fi
+if [ ! -x /bin/opkg ] && [ ! -x /usr/bin/apk ]; then
+	echo "error: neither opkg nor apk found (OpenWrt/iStoreOS only)" >&2
+	exit 1
+fi
+
+# Interactive selection. It runs inside a subshell on purpose: on hosts without a
+# usable /dev/tty (pipe, container, cron) the redirection fails inside that subshell
+# only -- dash treats such a failure as fatal, so it must never happen in the main
+# shell. An empty answer keeps the default source.
+if [ -z "$SOURCE" ]; then
+	_ans=$( { printf 'Select download source:\n  1) jsDelivr mirror (default)\n  2) GitHub direct\n  3) custom (ISONGWRT_FEED_BASE / ISONGWRT_GH_PROXY)\nNumber [1]: ' > /dev/tty; read -r _a < /dev/tty && printf '%s' "$_a"; } 2>/dev/null ) || _ans=""
+	case "$_ans" in 2) SOURCE=direct ;; 3) SOURCE=custom ;; *) SOURCE=mirror ;; esac
 fi
 SOURCE="${SOURCE:-mirror}"
 GH_PROXY="${ISONGWRT_GH_PROXY:-}"
@@ -27,11 +34,6 @@ echo "Source: $SOURCE${GH_PROXY:+ (prefix $GH_PROXY)}"
 
 REPO="c000127/isongwrt"
 PKG="luci-app-isongwrt"
-
-if [ ! -x /bin/opkg ] && [ ! -x /usr/bin/apk ]; then
-	echo "error: neither opkg nor apk found (OpenWrt/iStoreOS only)" >&2
-	exit 1
-fi
 
 fetch() { # <url> <outfile>: try curl, then uclient-fetch, then wget
 	if command -v curl >/dev/null 2>&1 && curl -fsSL --max-time 60 -o "$2" "$1"; then return 0; fi

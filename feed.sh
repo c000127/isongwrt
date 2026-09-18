@@ -45,15 +45,14 @@ JSD2="https://fastly.jsdelivr.net/gh/c000127/isongwrt@feed"
 RAW="https://raw.githubusercontent.com/c000127/isongwrt/feed"
 
 # interactive selection: only when /dev/tty is readable
-if [ -z "$SOURCE" ] && [ -r /dev/tty ]; then
-	printf 'Select feed source:\n  1) jsDelivr mirror (default)\n  2) GitHub direct\n  3) custom (ISONGWRT_FEED_BASE)\nNumber [1]: ' > /dev/tty
-	if read -r _ans < /dev/tty 2>/dev/null; then
-		case "$_ans" in
-			2) SOURCE=direct ;;
-			3) SOURCE=custom ;;
-			*) SOURCE=mirror ;;
-		esac
-	fi
+# Interactive selection. It runs inside a subshell on purpose: on hosts without a
+# usable /dev/tty (pipe, container, cron) the redirection fails inside that subshell
+# only -- dash treats such a failure as fatal, so it must never happen in the main
+# shell. An empty answer keeps the default source.
+if [ -z "$SOURCE" ]; then
+	_ans=$( { printf 'Select feed source:\n  1) jsDelivr mirror (default)\n  2) GitHub direct\n  3) custom (ISONGWRT_FEED_BASE)\nNumber [1]: ' > /dev/tty; read -r _a < /dev/tty && printf '%s' "$_a"; } 2>/dev/null ) || _ans=""
+	case "$_ans" in 2) SOURCE=direct ;; 3) SOURCE=custom ;; *) SOURCE=mirror ;; esac
+fi
 fi
 SOURCE="${SOURCE:-mirror}"
 
