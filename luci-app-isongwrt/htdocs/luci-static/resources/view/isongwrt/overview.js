@@ -61,6 +61,9 @@ return view.extend({
 		}
 
 		function warnText(st) {
+			if (st.api_port_conflict)
+				return E('span', { 'style': 'color:#c60' },
+					'API 端口与配置文件内的 clash_api/入站端口相同：内核会启动后立刻退出，请二选一改端口（配置里改 clash_api，或到「面板」页改 API 端口）');
 			if (st.api_port_busy)
 				return E('span', { 'style': 'color:#c60' }, 'API 端口被占用：请到「面板」页改用其它端口，否则内核无法启动');
 			if (st.core_installed === false)
