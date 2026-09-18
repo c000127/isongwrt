@@ -56,20 +56,16 @@ return view.extend({
 					return E('tr', { 'class': 'tr' }, [
 						E('td', { 'class': 'td left' }, v.version + (isActive ? ' ★' : '')),
 						E('td', { 'class': 'td left' }, v.size ? (Math.round(v.size / 1048576 * 10) / 10) + ' MiB' : '—'),
-						E('td', { 'class': 'td left' }, isActive ? E('em', {}, '当前激活') : [
-							btn('激活', 'apply', function () {
+						E('td', { 'class': 'td left' }, [
+							isActive ? E('em', {}, '当前激活') : btn('激活', 'apply', function () {
 								return iso.busy(iso.call(['activate', v.version]), '切换内核…').then(function (r) {
 									iso.notify(r, '已切换到 ' + v.version);
 									return reload();
 								});
 							}),
-							' ',
-							btn('删除', 'remove', function () {
-								return iso.busy(iso.call(['remove', v.version]), '删除…').then(function (r) {
-									iso.notify(r, '已删除 ' + v.version);
-									return reload();
-								});
-							})
+							isActive ? '' : ' ',
+							btn('删除', 'remove', function () { return doRemove(v.version, isActive); }),
+							(isActive && (self.installed.versions || []).length > 1) ? '' : ''
 						])
 					]);
 				}));
@@ -77,6 +73,33 @@ return view.extend({
 
 		function paintInstalled() {
 			dom.content(self.installedInner, installedTable());
+		}
+
+		function doRemove(version, isActive) {
+			function run() {
+				var args = isActive ? [ 'remove', version, 'force' ] : [ 'remove', version ];
+				return iso.busy(iso.call(args), '删除内核…').then(function (r) {
+					if (r && r.ok) {
+						var msg = '已删除 ' + version;
+						if (r.activated) msg += '，已自动切换到 ' + r.activated;
+						else if (r.activated === null) msg += '（已无可用内核，服务将无法启动）';
+						iso.notify({ ok: true }, msg);
+					} else {
+						iso.notify(r, '');
+					}
+					return reload();
+				});
+			}
+			if (!isActive) return run();
+			ui.showModal('删除当前激活的内核', [
+				E('p', {}, '「' + version + '」是当前激活的内核。删除后会停止服务；若还有其它版本，将自动切换到其中最新的一版。'),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'btn', 'click': ui.hideModal }, '取消'),
+					' ',
+					E('button', { 'class': 'btn cbi-button-negative', 'click': function () { ui.hideModal(); return run(); } }, '确认删除')
+				])
+			]);
+			return Promise.resolve();
 		}
 
 		function reload() {

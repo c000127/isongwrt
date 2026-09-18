@@ -247,11 +247,38 @@ do_rollback() {
 	ok ",\"version\":\"$_prev\""
 }
 
-do_remove() { # <version>
-	_v="$1"; _cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
-	[ "$_v" = "$_cur" ] && die "不能删除当前激活版本（先切换/回滚）"
+do_remove() { # <version> [force]
+	_v="$1"; _force="${2:-}"
+	[ -x "$INSTALL_DIR/sing-box-${_v}" ] || die "版本未安装：$_v"
+	_cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
+
+	if [ "$_v" = "$_cur" ]; then
+		# 删除当前激活版本：需 force（面板会先弹确认）
+		[ "$_force" = "force" ] || die "不能删除当前激活版本（面板中删除会先确认；或先「激活」其它版本）"
+		_was_running=0
+		pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && _was_running=1
+		[ "$_was_running" = 1 ] && /etc/init.d/isongwrt stop >/dev/null 2>&1
+		rm -f "$INSTALL_DIR/sing-box-${_v}" "$INSTALL_DIR/sing-box-${_v}.meta"
+		rm -f "$ACTIVE_FILE"
+		_prev=$(cat "$STATE_DIR/previous" 2>/dev/null || echo "")
+		[ "$_v" = "$_prev" ] && rm -f "$STATE_DIR/previous"
+		# 若还有其它版本，自动激活最新的一版
+		_next=$(ls -1 "$INSTALL_DIR"/sing-box-* 2>/dev/null | grep -v '\.meta$' | sort -V | tail -1)
+		if [ -n "$_next" ]; then
+			_nv=${_next##*/sing-box-}
+			cp "$_next" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
+			printf '%s' "$_nv" > "$ACTIVE_FILE"
+			[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
+			ok ",\"removed\":\"$_v\",\"activated\":\"$_nv\""
+		else
+			rm -f "$CORE_PATH" "$STATE_DIR/previous"
+			ok ",\"removed\":\"$_v\",\"activated\":null,\"note\":\"已无可用内核，服务将无法启动\""
+		fi
+		return 0
+	fi
+
+	# 非激活版本：直接删除
 	rm -f "$INSTALL_DIR/sing-box-${_v}" "$INSTALL_DIR/sing-box-${_v}.meta"
-	# 若 previous 指向被删除的版本，一并清除（否则回滚会失败）
 	_prev=$(cat "$STATE_DIR/previous" 2>/dev/null || echo "")
 	[ "$_v" = "$_prev" ] && rm -f "$STATE_DIR/previous"
 	ok ",\"removed\":\"$_v\""
@@ -515,7 +542,7 @@ case "${1:-status}" in
 	install-status) do_install_status ;;
 	activate)    do_activate "${2:?}" ;;
 	rollback)    do_rollback ;;
-	remove)      do_remove "${2:?}" ;;
+	remove)      do_remove "${2:?}" "${3:-}" ;;
 	config-list)    do_config_list ;;
 	config-get)     do_config_get "${2:?}" ;;
 	config-save)    do_config_save "${2:?}" "${3:-}" ;;
