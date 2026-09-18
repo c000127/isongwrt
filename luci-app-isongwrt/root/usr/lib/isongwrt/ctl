@@ -521,53 +521,103 @@ do_api_secret_new() {
 # ---------- API / 面板托管（独立分片文件，避免改动用户配置） ----------
 do_api_sync() {
 	init_dirs
-	# 访问密钥：默认自动生成并写回 UCI（仅首次；之后可在面板页重新生成）
-	if [ -z "$API_SECRET" ]; then
+	_f="$CONF_DIR/90-isongwrt-api.json"
+
+	# ---------- 检测「上传配置」里已定义的方案（面板只补缺，绝不覆盖） ----------
+	_u_api=false; _u_clash=false; _u_http_tag=""
+	for _cf in "$CONF_DIR"/*.json; do
+		case "$_cf" in *90-isongwrt-api.json) continue ;; esac
+		[ -f "$_cf" ] || continue
+		grep -q '"type": *"api"' "$_cf" 2>/dev/null && _u_api=true
+		grep -q '"clash_api"' "$_cf" 2>/dev/null && _u_clash=true
+		if [ -z "$_u_http_tag" ]; then
+			_u_http_tag=$(sed -n 's/.*"default_http_client": *"\([^"]*\)".*/\1/p' "$_cf" 2>/dev/null | head -1)
+			[ -n "$_u_http_tag" ] || _u_http_tag=$(sed -n '/"http_clients"/,/]/p' "$_cf" 2>/dev/null | sed -n 's/.*"tag": *"\([^"]*\)".*/\1/p' | head -1)
+		fi
+	done
+
+	_clash_src=none; [ "$_u_clash" = true ] && _clash_src=config
+	_need_api=$DASHBOARD
+	_need_clash=false
+	[ "$CLASH_API" = 1 ] && [ "$_u_clash" = false ] && _need_clash=true
+	_clash_src_panel=false; [ "$_need_clash" = true ] && _clash_src_panel=true
+
+	# 配置里已有 API 服务 → 面板完全不注入
+	if [ "$_u_api" = true ]; then
+		[ -f "$_f" ] && rm -f "$_f"
+		_write_source config "$_clash_src"
+		ok ",\"api_file\":null,\"api_source\":\"config\",\"clash_source\":\"$_clash_src\",\"note\":\"配置已自带 API 服务，面板未注入任何分片\""
+		return 0
+	fi
+
+	# 面板不需要注入任何东西 → 清掉历史分片
+	if [ "$_need_api" != 1 ] && [ "$_need_clash" != true ]; then
+		[ -f "$_f" ] && rm -f "$_f"
+		_write_source none "$_clash_src"
+		ok ",\"api_file\":null,\"api_source\":\"none\",\"clash_source\":\"$_clash_src\""
+		return 0
+	fi
+
+	# 访问密钥：仅面板自己写 api 服务时才需要（默认自动生成并写回 UCI）
+	if [ "$_need_api" = 1 ] && [ -z "$API_SECRET" ]; then
 		API_SECRET=$(head -c 32 /dev/urandom | md5sum | cut -c1-24)
 		uci -q set isongwrt.main.api_secret="$API_SECRET" >/dev/null 2>&1 && uci -q commit isongwrt >/dev/null 2>&1
 		printf '[api-sync] 已自动生成访问密钥\n' >&2
 	fi
 	[ -n "$API_LISTEN" ] || API_LISTEN=0.0.0.0
-	_f="$CONF_DIR/90-isongwrt-api.json"
-	if [ "$DASHBOARD" != 1 ] && [ "$CLASH_API" != 1 ]; then
-		rm -f "$_f"
-		ok ",\"api_file\":null"
-		return 0
-	fi
-	{
-		# 面板下载需要显式 HTTP client（1.14 起隐式默认客户端已弃用并会 FATAL）；
-		# 这里只给 dashboard 指定专用 client，不覆盖用户的 route.default_http_client。
-		printf '{\n  "http_clients": [ { "tag": "isongwrt-dashboard" } ],\n'
-		printf '  "services": [\n    {\n      "type": "api",\n      "tag": "isongwrt-api",\n'
-		printf '      "listen": "%s",\n      "listen_port": %s,\n' "$API_LISTEN" "$API_PORT"
-		[ -n "$API_SECRET" ] && printf '      "secret": "%s",\n' "$(json_esc "$API_SECRET")"
-		printf '      "access_control_allow_private_network": true,\n'
-		if [ "$DASHBOARD" = 1 ]; then
-			if [ -n "$DASH_URL" ]; then
-				printf '      "dashboard": { "enabled": true, "update_interval": "1d", "http_client": "isongwrt-dashboard", "download_url": "%s" }\n' "$(json_esc "$DASH_URL")"
-			else
-				printf '      "dashboard": { "enabled": true, "update_interval": "1d", "http_client": "isongwrt-dashboard" }\n'
-			fi
+
+	# http client：配置里已有就复用其 tag（不重复定义 http_clients，避免与用户配置打架）
+	_http_line=""; _dash_client="isongwrt-dashboard"
+	if [ "$_need_api" = 1 ]; then
+		if [ -n "$_u_http_tag" ]; then
+			_dash_client="$_u_http_tag"
 		else
-			printf '      "dashboard": { "enabled": false }\n'
+			_http_line='  "http_clients": [ { "tag": "isongwrt-dashboard" } ],'
 		fi
-		printf '    }\n  ]'
-		if [ "$CLASH_API" = 1 ]; then
-			printf ',\n  "experimental": {\n    "clash_api": {\n      "external_controller": "%s:%s"' "$API_LISTEN" "$CLASH_PORT"
+	fi
+
+	{
+		printf '{\n'
+		[ -n "$_http_line" ] && printf '%s\n' "$_http_line"
+		if [ "$_need_api" = 1 ]; then
+			printf '  "services": [\n    {\n      "type": "api",\n      "tag": "isongwrt-api",\n'
+			printf '      "listen": "%s",\n      "listen_port": %s,\n' "$API_LISTEN" "$API_PORT"
+			[ -n "$API_SECRET" ] && printf '      "secret": "%s",\n' "$(json_esc "$API_SECRET")"
+			printf '      "access_control_allow_private_network": true,\n'
+			if [ -n "$DASH_URL" ]; then
+				printf '      "dashboard": { "enabled": true, "update_interval": "1d", "http_client": "%s", "download_url": "%s" }\n' "$_dash_client" "$(json_esc "$DASH_URL")"
+			else
+				printf '      "dashboard": { "enabled": true, "update_interval": "1d", "http_client": "%s" }\n' "$_dash_client"
+			fi
+			if [ "$_need_clash" = true ]; then printf '    }\n  ],\n'; else printf '    }\n  ]\n'; fi
+		fi
+		if [ "$_need_clash" = true ]; then
+			printf '  "experimental": {\n    "clash_api": {\n      "external_controller": "%s:%s"' "$API_LISTEN" "$CLASH_PORT"
 			[ -n "$CLASH_SECRET" ] && printf ',\n      "secret": "%s"' "$(json_esc "$CLASH_SECRET")"
-			printf '\n    }\n  }'
+			printf '\n    }\n  }\n'
 		fi
-		printf '\n}\n'
+		printf '}\n'
 	} > "$_f"
+
 	if ! _err=$(CONF_CHECK 2>&1); then
 		rm -f "$_f"
-		die "生成 API 分片失败（与现有配置冲突？）：$(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
+		_write_source none none
+		die "生成 API 分片失败（与配置冲突？）：$(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
 	fi
+
+	_panel_api=none; [ "$_need_api" = 1 ] && _panel_api=panel
+	[ "$_need_clash" = true ] && _clash_src=panel
+	_write_source "$_panel_api" "$_clash_src"
 	_busy=""
-	if [ "$DASHBOARD" = 1 ] && netstat -tln 2>/dev/null | grep -q ":$API_PORT "; then
+	if [ "$_need_api" = 1 ] && netstat -tln 2>/dev/null | grep -q ":$API_PORT "; then
 		pgrep -f "$CORE_PATH run" >/dev/null 2>&1 || _busy="（注意：端口 $API_PORT 已被其它程序占用，服务可能启动失败）"
 	fi
-	ok ",\"api_file\":\"$(json_esc "$_f")\",\"warning\":\"$_busy\""
+	ok ",\"api_file\":\"$(json_esc "$_f")\",\"api_source\":\"$_panel_api\",\"clash_source\":\"$_clash_src\",\"warning\":\"$_busy\""
+}
+
+# 记录「API/clash 由谁提供」，供状态页展示
+_write_source() {
+	printf 'api_source=%s\nclash_source=%s\n' "$1" "$2" > "$STATE_DIR/api-source" 2>/dev/null
 }
 
 # ---------- 状态 / 日志 / 服务 ----------
@@ -592,11 +642,33 @@ do_status() {
 		# 若占用者不是本服务（未运行时），视为冲突
 		[ "$_running" = false ] && _port_busy=true
 	fi
-	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","core_installed":%s,"channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","api_port_busy":%s,"dashboard":%s,"clash_api":%s,"config_check":"%s"}\n' \
+
+	# API/clash 由谁提供（api-sync 写入；config = 上传配置自带，panel = 面板注入）
+	_api_src=none; _clash_src=none
+	if [ -f "$STATE_DIR/api-source" ]; then
+		_api_src=$(sed -n 's/^api_source=//p' "$STATE_DIR/api-source" | head -1)
+		_clash_src=$(sed -n 's/^clash_source=//p' "$STATE_DIR/api-source" | head -1)
+		[ -n "$_api_src" ] || _api_src=none
+		[ -n "$_clash_src" ] || _clash_src=none
+	fi
+
+	# 配置内冲突：用户配置里的 clash_api/入站 若与面板 API 端口相同，内核会启动成功后立刻 FATAL 退出
+	_api_conflict=false
+	for _cf in "$CONF_DIR"/*.json; do
+		[ -f "$_cf" ] || continue
+		case "$_cf" in *90-isongwrt-api.json) continue ;; esac
+		if grep -qE '\"external_controller\": *\"[^\"]*:'"$API_PORT"'\"' "$_cf" 2>/dev/null; then
+			_api_conflict=true; break
+		fi
+		if grep -qE '\"listen_port\": *'"$API_PORT"'([^0-9]|$)' "$_cf" 2>/dev/null; then
+			_api_conflict=true; break
+		fi
+	done
+	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","core_installed":%s,"channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","api_port_busy":%s,"api_port_conflict":%s,"dashboard":%s,"clash_api":%s,"config_check":"%s","api_source":"%s","clash_source":"%s"}\n' \
 		"$_running" "$_pid" "$_enabled" "$(json_esc "$_ver")" "$(cat "$ACTIVE_FILE" 2>/dev/null)" "$_core_installed" \
 		"$CHANNEL" "$(detect_arch)" "$(json_esc "$CORE_PATH")" "$(json_esc "$CONF_DIR")" "$_nfiles" \
-		"$API_LISTEN" "$API_PORT" "$_port_busy" "$([ "$DASHBOARD" = 1 ] && echo true || echo false)" \
-		"$([ "$CLASH_API" = 1 ] && echo true || echo false)" "$_chk"
+		"$API_LISTEN" "$API_PORT" "$_port_busy" "$_api_conflict" "$([ "$DASHBOARD" = 1 ] && echo true || echo false)" \
+		"$([ "$CLASH_API" = 1 ] && echo true || echo false)" "$_chk" "$_api_src" "$_clash_src"
 }
 
 do_installed() {
@@ -618,8 +690,13 @@ do_installed() {
 
 do_log() {
 	_n=${1:-200}
+	_esc=$(printf '\033')
 	printf '{"ok":true,"log":"'
-	logread 2>/dev/null | grep -E 'isongwrt|sing-box' | tail -n "$_n" | json_ml
+	# 去掉 ANSI 颜色序列与其余控制字符：raw 控制字符会让 JSON 非法，前端 JSON.parse 直接失败（页面空白）
+	logread 2>/dev/null | grep -E 'isongwrt|sing-box' | tail -n "$_n" \
+		| sed "s/${_esc}\[[0-9;]*[A-Za-z]//g" \
+		| tr -d '\000-\010\013\014\016-\037' \
+		| json_ml
 	printf '"}\n'
 }
 

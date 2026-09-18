@@ -19,11 +19,14 @@ function row(title, field, desc) {
 
 return view.extend({
 	load: function () {
-		return iso.loadUci();
+		return Promise.all([ iso.loadUci(), iso.call(['status']) ]);
 	},
 
-	render: function () {
+	render: function (data) {
 		var m, s, o, self = this;
+		var st = (data && data[1]) || {};
+		self.apiSource = st.api_source || 'none';
+		self.clashSource = st.clash_source || 'none';
 
 		function panelUrl() {
 			return window.location.protocol + '//' + window.location.hostname + ':' +
@@ -71,7 +74,14 @@ return view.extend({
 
 		return m.render().then(function (mapNode) {
 			var url = panelUrl();
-			return E('div', {}, [
+			var notices = [];
+			if (self.apiSource === 'config')
+				notices.push(E('div', { 'class': 'cbi-section' }, E('div', { 'style': 'color:#c60' },
+					'检测到你的配置里已定义 API 服务：面板不会注入或覆盖它，本页「启用官方面板 / 监听端口 / 访问密钥」仅在由面板生成时才生效。')));
+			else if (self.clashSource === 'config')
+				notices.push(E('div', { 'class': 'cbi-section' }, E('div', { 'style': 'color:#888' },
+					'检测到你的配置里已定义 clash_api：面板不再注入 Clash API（下方开关保持关闭即可）。')));
+			return E('div', {}, notices.concat([
 				mapNode,
 				E('div', { 'class': 'cbi-section' }, [
 					row('操作', E('div', {}, [
@@ -87,7 +97,7 @@ return view.extend({
 					row('面板入口', E('a', { 'href': url, 'target': '_blank' }, url),
 						'浏览器首次打开需输入上方「访问密钥」；局域网内其它设备同样可访问。')
 				])
-			]);
+			]));
 		});
 	}
 });
