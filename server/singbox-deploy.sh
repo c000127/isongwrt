@@ -50,6 +50,8 @@ WORK_DIR="${CONF_DIR}"
 DATA_DIR="${ISONGWRT_DATA_DIR:-/var/lib/isongwrt}"
 LEGACY_DATA_DIR="/var/lib/homobox"         # 兼容旧部署记录（可读不可写）
 BACKUP_DIR="${ISONGWRT_BACKUP_DIR:-/var/backups/isongwrt}"
+SMARTDNS_CONF="${ISONGWRT_SMARTDNS_CONF:-/etc/smartdns/isongwrt.conf}"
+SMARTDNS_ENVFILE="${ISONGWRT_SMARTDNS_ENVFILE:-/etc/default/smartdns}"
 UNIT_FILE="${ISONGWRT_UNIT_FILE:-/etc/systemd/system/sing-box.service}"
 RECORD="${DATA_DIR}/deploy-record.json"
 PASSWORD_FILE="${DATA_DIR}/ss2022.password"
@@ -364,12 +366,26 @@ deploy_smartdns() {
   if ! command -v smartdns >/dev/null 2>&1; then
     run apt-get install -y -qq smartdns || warn "apt 安装 smartdns 失败，请自行安装后重跑"
   fi
-  local conf=/etc/smartdns/smartdns.conf
-  if [[ $DRY_RUN -eq 0 ]]; then
-    [[ -f "${conf}.orig" ]] || cp "$conf" "${conf}.orig" 2>/dev/null || true
-    cat > "$conf" <<EOF
-# isongwrt managed —— 原文件备份见 smartdns.conf.orig
+
+  # 设计：不改动发行版的 /etc/smartdns/smartdns.conf（dpkg conffile，改它升级时会冲突、也丢掉文档注释）。
+  #   1) 我们的配置单独放 $SMARTDNS_CONF
+  #   2) 通过 $SMARTDNS_ENVFILE（/etc/default/smartdns）里的 SMART_DNS_OPTS="-c <该文件>" 生效
+  # 注意：**不能**用 systemd drop-in 的 Environment= 来做（实测过：单元的 EnvironmentFile 优先级更高，
+  #       会把 drop-in 的值覆盖成空），所以必须改这个「选项文件」——它本来就是为此存在的。
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '\033[36m[dry-run]\033[0m 写入 %s，并在 %s 设置 SMART_DNS_OPTS="-c %s"，随后重启 smartdns\n' \
+      "$SMARTDNS_CONF" "$SMARTDNS_ENVFILE" "$SMARTDNS_CONF"
+    return 0
+  fi
+
+  install -d -m 0755 "$(dirname "$SMARTDNS_CONF")"
+  cat > "$SMARTDNS_CONF" <<EOF
+# isongwrt managed —— 本文件由 isongwrt 服务端部署脚本生成
+# 发行版的 /etc/smartdns/smartdns.conf 保持原样不动；本文件通过
+#   ${SMARTDNS_ENVFILE} 中的 SMART_DNS_OPTS="-c <本文件>" 生效
+# 完整选项说明: https://pymumu.github.io/smartdns/config/basic-config/
 server-name isongwrt-dns
+# 只监听回环 + 非 53 端口：给本机 sing-box 用；避免与 systemd-resolved/dnsmasq 抢 53，也避免变成公网开放解析器
 bind 127.0.0.1:${SMARTDNS_PORT}
 bind-tcp 127.0.0.1:${SMARTDNS_PORT}
 speed-check-mode ping,tcp:80,tcp:443
@@ -378,16 +394,32 @@ prefetch-domain yes
 serve-expired yes
 $(for up in $SMARTDNS_UPSTREAMS; do printf 'server %s\n' "$up"; done)
 EOF
-    systemctl restart smartdns
-    systemctl enable smartdns >/dev/null 2>&1 || true
-    sleep 1
-    if command -v dig >/dev/null; then
-      dig +time=3 +tries=1 @127.0.0.1 -p "${SMARTDNS_PORT}" example.com A >/dev/null 2>&1 \
-        && log "smartdns 健康检查通过（127.0.0.1:${SMARTDNS_PORT}）" \
-        || warn "smartdns 未响应 dig（可能仍在启动）"
-    fi
+  chmod 0644 "$SMARTDNS_CONF"
+
+  [[ -f "$SMARTDNS_ENVFILE" ]] || printf '# isongwrt managed\nSMART_DNS_OPTS=\n' > "$SMARTDNS_ENVFILE"
+  [[ -f "${SMARTDNS_ENVFILE}.isongwrt-orig" ]] || cp "$SMARTDNS_ENVFILE" "${SMARTDNS_ENVFILE}.isongwrt-orig" 2>/dev/null || true
+  if grep -qE '^[[:space:]]*SMART_DNS_OPTS=' "$SMARTDNS_ENVFILE"; then
+    warn "覆盖 ${SMARTDNS_ENVFILE} 里已有的 SMART_DNS_OPTS（原值见 ${SMARTDNS_ENVFILE}.isongwrt-orig）"
+    sed -i "s|^[[:space:]]*SMART_DNS_OPTS=.*|SMART_DNS_OPTS=\"-c ${SMARTDNS_CONF}\"|" "$SMARTDNS_ENVFILE"
   else
-    printf '\033[36m[dry-run]\033[0m 写入 %s 并重启 smartdns\n' "$conf"
+    printf 'SMART_DNS_OPTS="-c %s"\n' "$SMARTDNS_CONF" >> "$SMARTDNS_ENVFILE"
+  fi
+
+  # 清理历史版本可能写入的 systemd drop-in（两套机制不能并存）
+  if [[ -f /etc/systemd/system/smartdns.service.d/90-isongwrt.conf ]]; then
+    rm -f /etc/systemd/system/smartdns.service.d/90-isongwrt.conf
+    rmdir /etc/systemd/system/smartdns.service.d 2>/dev/null || true
+    warn "已移除旧版 drop-in（改用 ${SMARTDNS_ENVFILE} 注入）"
+  fi
+
+  systemctl daemon-reload
+  systemctl enable smartdns >/dev/null 2>&1 || true
+  systemctl restart smartdns
+  sleep 1
+  if command -v dig >/dev/null; then
+    dig +time=3 +tries=1 @127.0.0.1 -p "${SMARTDNS_PORT}" example.com A >/dev/null 2>&1 \
+      && log "smartdns 健康检查通过（127.0.0.1:${SMARTDNS_PORT}，配置 ${SMARTDNS_CONF}）" \
+      || warn "smartdns 未响应 dig —— 查 journalctl -u smartdns -n 30（确认 ${SMARTDNS_ENVFILE} 里 SMART_DNS_OPTS 已生效）"
   fi
 }
 
