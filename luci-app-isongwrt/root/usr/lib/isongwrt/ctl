@@ -251,6 +251,9 @@ do_remove() { # <version>
 	_v="$1"; _cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
 	[ "$_v" = "$_cur" ] && die "不能删除当前激活版本（先切换/回滚）"
 	rm -f "$INSTALL_DIR/sing-box-${_v}" "$INSTALL_DIR/sing-box-${_v}.meta"
+	# 若 previous 指向被删除的版本，一并清除（否则回滚会失败）
+	_prev=$(cat "$STATE_DIR/previous" 2>/dev/null || echo "")
+	[ "$_v" = "$_prev" ] && rm -f "$STATE_DIR/previous"
 	ok ",\"removed\":\"$_v\""
 }
 
