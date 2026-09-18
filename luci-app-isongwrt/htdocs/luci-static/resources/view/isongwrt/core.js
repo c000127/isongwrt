@@ -24,13 +24,27 @@ function row(title, field, desc) {
 
 return view.extend({
 	load: function () {
-		return iso.call(['installed']);
+		return Promise.all([ iso.call(['installed']), iso.call(['channels', 'cached']) ]);
 	},
 
-	render: function (inst) {
+	render: function (data) {
 		var m, s, o, self = this;
-		self.installed = inst || {};
+		self.installed = data[0] || {};
 		self.channels = null;
+		self.fetchedAtText = '';
+		self.staleWarning = '';
+		var cached = data[1] || {};
+		if (cached.ok && cached.cached) {
+			self.channels = cached.channels || [];
+			self.fetchedAtText = cached.fetched_at_text || '';
+		}
+
+		/* 说明文字：与表格/正文同左边界（不用 cbi-section-descr，它自带 1.25rem 左内边距） */
+		function note(text, top) {
+			return E('div', {
+				'style': 'color:#888;font-size:small;line-height:1.5;margin:' + (top || '.35rem') + ' 0 0'
+			}, text);
+		}
 
 		/* ---- 视图自持的动态节点（不走 form.DummyValue，避免表单渲染差异） ---- */
 		self.latestInner = E('div', {}, E('em', {}, '未检查'));
@@ -38,10 +52,9 @@ return view.extend({
 
 		function paintLatest() {
 			if (!self.channels) {
-				dom.content(self.latestInner, E('div', {}, [
+				dom.content(self.latestInner, E('div', { 'style': 'padding:.25rem 0' }, [
 					E('em', {}, '尚未检查。'),
-					E('div', { 'class': 'cbi-section-descr' },
-						'点上方「检查更新」从官方 Releases（SagerNet/sing-box）读取各渠道最新版本与更新状态。')
+					note('点上方「检查更新」从官方 Releases（SagerNet/sing-box）读取各渠道最新版本与更新状态。')
 				]));
 				return;
 			}
@@ -69,19 +82,19 @@ return view.extend({
 				]));
 			});
 			dom.content(self.latestInner, E('div', {}, [
+				self.staleWarning ? E('div', { 'style': 'color:#c60;margin:.25rem 0' }, '⚠ ' + self.staleWarning + '（' + (self.fetchedAtText || '') + '）') : '',
 				E('table', { 'class': 'table' }, rows),
-				E('div', { 'class': 'cbi-section-descr' },
-					'来源：官方 Releases；安装按上方「渠道」选择执行（点「安装 / 升级」时会自动先保存设置）。')
+				note('来源：官方 Releases' + (self.fetchedAtText ? '（上次检查：' + self.fetchedAtText + '）' : '') +
+					'；安装按上方「渠道」选择执行（点「安装 / 升级」时会自动先保存设置）。')
 			]));
 		}
 
 		function installedTable() {
 			var versions = (self.installed.versions || []);
 			if (!versions.length)
-				return E('div', {}, [
+				return E('div', { 'style': 'padding:.25rem 0' }, [
 					E('em', {}, '尚未安装内核。'),
-					E('div', { 'class': 'cbi-section-descr' },
-						'点上方「安装 / 升级」从官方 Releases 下载安装（视网络约 30–90 MB）；也可在「配置管理」中导入配置。')
+					note('点上方「安装 / 升级」从官方 Releases 下载安装（视网络约 30–90 MB）；也可在「配置管理」中导入配置。')
 				]);
 
 			var rows = [ E('tr', { 'class': 'tr table-titles' }, [
@@ -114,8 +127,7 @@ return view.extend({
 
 			return E('div', {}, [
 				E('table', { 'class': 'table' }, rows),
-				E('div', { 'class': 'cbi-section-descr' },
-					'★ = 当前激活；「激活」立即切换并重启服务；删除当前激活版本会先确认（若还有其它版本，将自动切换到其中最新的一版）。')
+				note('★ = 当前激活；「激活」立即切换并重启服务；删除当前激活版本会先确认（若还有其它版本，将自动切换到其中最新的一版）。')
 			]);
 		}
 
@@ -162,6 +174,8 @@ return view.extend({
 			return iso.busy(iso.call(['channels', 'force']), '正在检查官方 Releases…').then(function (r) {
 				if (r && r.ok) {
 					self.channels = r.channels || [];
+					self.staleWarning = r.stale ? (r.warning || '刷新失败，以下为上次结果') : '';
+					self.fetchedAtText = r.stale ? (r.fetched_at_text || '') : '刚刚';
 					paintLatest();
 					return;
 				}

@@ -13,6 +13,8 @@ BACKUP_DIR="$STATE_DIR/backups"
 CONF_DIR_DEFAULT="$STATE_DIR/conf"
 ACTIVE_FILE="$STATE_DIR/active"
 CACHE_DIR=/tmp/isongwrt-cache
+STATE_CACHE="$STATE_DIR/cache"          # 持久缓存（版本列表，重启后仍可用于展示）
+ATOM_CACHE="$STATE_CACHE/releases.atom"
 GH_REPO=SagerNet/sing-box
 GH_API="https://api.github.com/repos/$GH_REPO/releases"
 UA="isongwrt/0.1.0"
@@ -91,6 +93,8 @@ detect_arch() {
 	esac
 }
 
+FETCH_STALE=0   # 1 = 本次结果来自旧缓存（刷新失败）
+
 # 版本号严格校验：仅接受 vX.Y.Z 或 vX.Y.Z-pre.N（拒绝把正文里的 emoji/文本当版本）
 valid_tag() {
 	case "$1" in
@@ -105,31 +109,41 @@ valid_tag() {
 
 # ---------- GitHub 版本解析（无 jq，awk 状态机解析 pretty-printed JSON） ----------
 # 版本来源：优先 releases.atom（约 20KB，github.com CDN），失败退回 REST API
-fetch_releases_atom() {
-	_a="$CACHE_DIR/releases.atom"
-	_now=$(date +%s); _age=999999
-	[ -f "$_a" ] && _age=$(( _now - $(date -r "$_a" +%s 2>/dev/null || echo 0) ))
-	if [ "$_age" -gt 600 ]; then
-		dl_get "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" "$_a.tmp" 20 2>/dev/null || { rm -f "$_a.tmp"; return 1; }
-		mv "$_a.tmp" "$_a"
-	fi
-	[ -s "$_a" ] || return 1
-	# 权威 tag 在 <id>tag:github.com,2008:Repository/<n>/v1.15.0-alpha.5</id>
-	# （entry 的 <title> 不带 v 前缀，不可用于下载 URL）
-	_tags=$(sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9]*/\(v[^<]*\)</id>.*#\1#p' "$_a" | while read -r _t; do
+# 解析并校验 atom 文件里的 tag（entry 的 <title> 无 v 前缀，故用 <id> 里的权威 tag）
+releases_from_atom() { # <atom-file>
+	[ -f "$1" ] || return 1
+	_tags=$(sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9]*/\(v[^<]*\)</id>.*#\1#p' "$1" | while read -r _t; do
 		valid_tag "$_t" && echo "$_t"
 	done)
-	if [ -z "$_tags" ]; then
-		# 内容异常（截断/错误页）→ 丢弃缓存，避免污染后续解析
-		rm -f "$_a"
-		return 1
-	fi
+	[ -n "$_tags" ] || return 1
 	printf '%s\n' "$_tags"
 }
 
-fetch_releases() {
+# 只读缓存（不联网）：用于页面加载时恢复上次「检查更新」的结果
+releases_cached() { releases_from_atom "$ATOM_CACHE"; }
+
+fetch_releases_atom() { # [force]：force 跳过 TTL 检查，但失败时保留旧缓存
+	_force="${1:-}"
+	mkdir -p "$STATE_CACHE"
+	_now=$(date +%s); _age=999999
+	[ -f "$ATOM_CACHE" ] && _age=$(( _now - $(date -r "$ATOM_CACHE" +%s 2>/dev/null || echo 0) ))
+	if [ "$_force" = "force" ] || [ "$_age" -gt 600 ]; then
+		if dl_get "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" "$ATOM_CACHE.tmp" 20 2>/dev/null; then
+			mv "$ATOM_CACHE.tmp" "$ATOM_CACHE"
+			FETCH_STALE=0
+		else
+			rm -f "$ATOM_CACHE.tmp"
+			FETCH_STALE=1                      # 标记：结果来自旧缓存
+			releases_from_atom "$ATOM_CACHE" || return 1
+			return 0
+		fi
+	fi
+	releases_from_atom "$ATOM_CACHE"
+}
+
+fetch_releases() { # [force]
 	init_dirs
-	if fetch_releases_atom; then rm -f "$CACHE_DIR/releases.json"; return 0; fi
+	if fetch_releases_atom "${1:-}"; then rm -f "$CACHE_DIR/releases.json"; return 0; fi
 	_f="$CACHE_DIR/releases.json"
 	_now=$(date +%s)
 	_age=999999
@@ -160,10 +174,18 @@ channel_match() { # <tag> <channel>
 	return 1
 }
 
-channel_latest() { # <channel>
-	fetch_releases | while read -r tag pre; do
-		channel_match "$tag" "$1" && { echo "$tag"; break; }
+_pick_channel() { # <channel>  从 stdin 的 tag 列表里取首个匹配
+	while read -r _tag _pre; do
+		channel_match "$_tag" "$1" && { echo "$_tag"; break; }
 	done
+}
+
+channel_latest() { # <channel>（联网）
+	fetch_releases | _pick_channel "$1"
+}
+
+channel_latest_cached() { # <channel>（只读持久缓存，不联网）
+	releases_cached 2>/dev/null | _pick_channel "$1"
 }
 
 channel_list() { # <channel> [limit]
@@ -511,17 +533,42 @@ do_log() {
 }
 
 do_channels() {
-	# force = 忽略本地缓存，强制重新拉取（“检查更新”按钮）
-	if [ "${1:-}" = "force" ]; then
-		rm -f "$CACHE_DIR/releases.atom" "$CACHE_DIR/releases.json"
+	_mode="${1:-}"
+
+	# cached：只读上次结果（页面加载用，不联网、不报错）
+	if [ "$_mode" = "cached" ]; then
+		if ! releases_cached >/dev/null 2>&1; then
+			printf '{"ok":true,"cached":false,"channels":[]}\n'
+			return 0
+		fi
+		_ts=$(date -r "$ATOM_CACHE" +%s 2>/dev/null || echo 0)
+		printf '{"ok":true,"cached":true,"fetched_at":%s,"fetched_at_text":"%s","channels":[' \
+			"${_ts:-0}" "$(date -r "$ATOM_CACHE" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+		_first=1
+		for c in stable rc beta alpha; do
+			_latest=$(channel_latest_cached "$c")
+			[ "$_first" = 1 ] || printf ','
+			_first=0
+			printf '{"name":"%s","latest":"%s"}' "$c" "$_latest"
+		done
+		printf ']}\n'
+		return 0
 	fi
-	if ! fetch_releases >/dev/null 2>&1; then
+
+	# force = 跳过缓存 TTL 强制重新拉取（“检查更新”按钮）；
+	# 注意：不清除旧缓存——若刷新失败，页面上仍能显示上次结果
+	if ! fetch_releases "$_mode" >/dev/null 2>&1; then
 		die "无法获取版本列表（GitHub 不可达或被限速，可在「内核管理」页填写加速前缀）"
 	fi
-	printf '{"ok":true,"channels":['
+	_stale=false
+	[ "$FETCH_STALE" = "1" ] && _stale=true
+	printf '{"ok":true,"refreshed":%s,"stale":%s' "$([ "$_stale" = true ] && echo false || echo true)" "$_stale"
+	printf ',"fetched_at_text":"%s"' "$(date -r "$ATOM_CACHE" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+	[ "$_stale" = true ] && printf ',"warning":"刷新失败，以下为上次结果"'
+	printf ',"channels":['
 	_first=1
 	for c in stable rc beta alpha; do
-		_latest=$(channel_latest "$c")
+		_latest=$(channel_latest_cached "$c")
 		[ "$_first" = 1 ] || printf ','
 		_first=0
 		printf '{"name":"%s","latest":"%s"}' "$c" "$_latest"
