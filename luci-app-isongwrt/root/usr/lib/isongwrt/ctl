@@ -91,6 +91,18 @@ detect_arch() {
 	esac
 }
 
+# 版本号严格校验：仅接受 vX.Y.Z 或 vX.Y.Z-pre.N（拒绝把正文里的 emoji/文本当版本）
+valid_tag() {
+	case "$1" in
+		v[0-9]*.[0-9]*.[0-9]*) ;;
+		*) return 1 ;;
+	esac
+	case "$1" in
+		*[!0-9A-Za-z.+-]*) return 1 ;;
+	esac
+	return 0
+}
+
 # ---------- GitHub 版本解析（无 jq，awk 状态机解析 pretty-printed JSON） ----------
 # 版本来源：优先 releases.atom（约 20KB，github.com CDN），失败退回 REST API
 fetch_releases_atom() {
@@ -104,7 +116,15 @@ fetch_releases_atom() {
 	[ -s "$_a" ] || return 1
 	# 权威 tag 在 <id>tag:github.com,2008:Repository/<n>/v1.15.0-alpha.5</id>
 	# （entry 的 <title> 不带 v 前缀，不可用于下载 URL）
-	sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9]*/\(v[^<]*\)</id>.*#\1#p' "$_a"
+	_tags=$(sed -n 's#.*<id>tag:github.com,2008:Repository/[0-9]*/\(v[^<]*\)</id>.*#\1#p' "$_a" | while read -r _t; do
+		valid_tag "$_t" && echo "$_t"
+	done)
+	if [ -z "$_tags" ]; then
+		# 内容异常（截断/错误页）→ 丢弃缓存，避免污染后续解析
+		rm -f "$_a"
+		return 1
+	fi
+	printf '%s\n' "$_tags"
 }
 
 fetch_releases() {
@@ -119,13 +139,18 @@ fetch_releases() {
 		[ -f "$_f.tmp" ] && mv "$_f.tmp" "$_f"
 	fi
 	[ -f "$_f" ] || return 1
+	# 完整性粗检：截断的响应（未以 ] 结束）直接丢弃
+	tail -c 200 "$_f" | grep -q '\]' || { rm -f "$_f"; return 1; }
 	awk '
 		/"tag_name":/ { gsub(/[",]/,"",$2); tag=$2 }
 		/"prerelease":/ { gsub(/,/,"",$2); if (tag!="") { print tag, $2; tag="" } }
-	' "$_f"
+	' "$_f" | while read -r _tag _pre; do
+		valid_tag "$_tag" && echo "$_tag $_pre"
+	done
 }
 
 channel_match() { # <tag> <channel>
+	valid_tag "$1" || return 1
 	case "$2" in
 		alpha) case "$1" in *-alpha.*) return 0;; esac ;;
 		beta)  case "$1" in *-beta.*)  return 0;; esac ;;
