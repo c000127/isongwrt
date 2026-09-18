@@ -8,7 +8,12 @@ start_service() {
 	local enabled core_path conf_dir work_dir
 	config_load isongwrt
 	config_get_bool enabled main enabled 0
-	[ "$enabled" = 1 ] || return 0
+
+	# enabled 仅表示“开机自启”；面板的「启动/重启」按钮为手动启动，不受其限制
+	if [ "$enabled" != "1" ] && [ "${ISONGWRT_MANUAL_START:-0}" != "1" ]; then
+		logger -t isongwrt "未启用开机自启（enabled=0），跳过启动"
+		return 0
+	fi
 	config_get core_path main core_path /usr/lib/isongwrt/sing-box
 	config_get conf_dir  main conf_dir  /etc/isongwrt/conf
 	config_get work_dir  main work_dir  /etc/isongwrt
