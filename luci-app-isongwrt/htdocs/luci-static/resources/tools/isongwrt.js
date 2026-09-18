@@ -1,5 +1,6 @@
 'use strict';
 'require baseclass';
+'require dom';
 'require fs';
 'require uci';
 'require ui';
@@ -43,12 +44,85 @@ function applyUci() {
 	return uci.save().then(function () { return uci.apply(); });
 }
 
+/* ---- 提醒：统一为弹窗（不再向页面顶部插入 alert-message，避免挤动布局） ---- */
+var _noticeOpen = false;
+
+function closeNotice() {
+	if (_noticeOpen) {
+		ui.hideModal();
+		_noticeOpen = false;
+	}
+}
+
+function notice(title, body, opts) {
+	closeNotice();
+	var body_nodes = Array.isArray(body) ? body : [ body ];
+	var timer = null;
+	function close() {
+		if (timer) { clearTimeout(timer); timer = null; }
+		closeNotice();
+	}
+	ui.showModal(title, body_nodes.concat([
+		E('div', { 'class': 'right', 'style': 'margin-top:.75rem' }, [
+			E('button', { 'class': 'btn cbi-button', 'click': close }, '关闭')
+		])
+	]));
+	_noticeOpen = true;
+	if (opts && opts.autoClose)
+		timer = setTimeout(close, opts.autoClose);
+}
+
+function alert(msg, level, title) {
+	var icon = (level === 'error') ? '❌ ' : (level === 'warning' ? '⚠️ ' : '✅ ');
+	var t = title || (level === 'error' ? '操作失败' : (level === 'warning' ? '提示' : '操作完成'));
+	notice(t, E('p', { 'style': 'margin:.25rem 0' }, icon + msg),
+		(level === 'error' || level === 'warning') ? null : { autoClose: 1800 });
+	return Promise.resolve();
+}
+
 function notify(res, okMsg) {
-	if (res && res.ok)
-		ui.addNotification(null, E('p', {}, okMsg || '操作成功'), 'info');
-	else
-		ui.addNotification(null, E('p', {}, '失败：' + ((res && res.error) || '未知错误')), 'error');
+	if (res && res.ok) {
+		notice('操作完成', E('p', { 'style': 'margin:.25rem 0' }, '✅ ' + (okMsg || '操作成功')), { autoClose: 1800 });
+	} else {
+		var err = ((res && res.error) || '未知错误');
+		notice('操作失败', [
+			E('p', { 'style': 'margin:.25rem 0' }, '❌ ' + err.split('\n')[0]),
+			err.split('\n').length > 1
+				? E('pre', { 'style': 'max-height:30vh;overflow:auto;white-space:pre-wrap;font-size:12px;background:#111;color:#ddd;padding:8px;border-radius:4px' }, err)
+				: ''
+		]);
+	}
 	return res;
+}
+
+/* ---- 保存：自己走一遍「保存 + 应用」，避免 LuCI 往页面顶部插提醒 ---- */
+function saveMaps(silent) {
+	var tasks = [];
+	var root = document.getElementById('maincontent') || document.getElementById('view') || document.body;
+	root.querySelectorAll('.cbi-map').forEach(function (node) {
+		var map = dom.findClassInstance(node);
+		if (map && typeof map.save === 'function')
+			tasks.push(map.save(null, true));      // silent=true：不弹顶部通知
+	});
+	return Promise.all(tasks);
+}
+
+function handleSave(ev) {
+	return saveMaps(true).catch(function (e) {
+		alert(String((e && e.message) || e), 'error', '保存失败');
+		throw e;
+	});
+}
+
+function handleSaveApply(ev, mode) {
+	return saveMaps(true).then(function () {
+		return ui.changes.apply(false);            // 提交并触发 procd reload（LuCI 自身状态为弹窗）
+	}).then(function () {
+		return alert('设置已保存并应用', 'ok', '已应用');
+	}).catch(function (e) {
+		alert(String((e && e.message) || e), 'error', '保存失败');
+		throw e;
+	});
 }
 
 function busy(promise, msg) {
@@ -65,6 +139,10 @@ function busy(promise, msg) {
 /* LuCI 模块必须返回 class（loader 会 new 它），故用 baseclass.extend */
 return baseclass.extend({
 	call: call,
+	alert: alert,
+	notice: notice,
+	handleSave: handleSave,
+	handleSaveApply: handleSaveApply,
 	loadUci: loadUci,
 	get: get,
 	set: set,

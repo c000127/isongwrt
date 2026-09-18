@@ -302,5 +302,9 @@ return view.extend({
 				])
 			]);
 		});
-	}
+	},
+
+	/* 保存/应用：弹窗式提醒（见 tools/isongwrt.js） */
+	handleSave: iso.handleSave,
+	handleSaveApply: iso.handleSaveApply
 });
