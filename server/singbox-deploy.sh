@@ -252,8 +252,7 @@ EOF
   _write "${cdir}/02_outbounds.json" <<'EOF'
 {
   "outbounds": [
-    { "type": "direct", "tag": "direct" },
-    { "type": "block",  "tag": "block" }
+    { "type": "direct", "tag": "direct" }
   ]
 }
 EOF
@@ -268,11 +267,11 @@ EOF
     "default_domain_resolver": { "server": "${dns_tag}", "strategy": "prefer_ipv4" },
     "rules": [
       { "action": "sniff" },
-      { "protocol": "bittorrent", "outbound": "block" },
-      { "rule_set": "geosite-category-ads-all", "outbound": "block" },
-      { "ip_is_private": true, "outbound": "block" },
+      { "protocol": "bittorrent", "action": "reject" },
+      { "rule_set": "geosite-category-ads-all", "action": "reject" },
+      { "ip_is_private": true, "action": "reject" },
       { "action": "resolve", "strategy": "prefer_ipv4" },
-      { "rule_set": "geoip-cn", "outbound": "block" }
+      { "rule_set": "geoip-cn", "action": "reject" }
     ],
     "rule_set": [
       {
