@@ -1,91 +1,64 @@
 # isongwrt
 
-OpenWrt / iStoreOS 上的 **sing-box 轻量管理面板**（LuCI 应用）。
+A small LuCI app for managing a sing-box core on OpenWrt / iStoreOS.
 
-| 功能 | 说明 |
+It installs and switches the core binary, manages config files, controls the
+service and shows logs. Settings follow the standard LuCI
+**Save & Apply / Save / Reset** flow.
+
+## Features
+
+- **Core** — install, switch and roll back cores from the official
+  [SagerNet/sing-box](https://github.com/SagerNet/sing-box) releases:
+  channels `stable` / `rc` / `beta` / `alpha`, architecture matched, or a pinned tag.
+  This project does not build kernels.
+- **Config** — edit or upload config files; `sing-box check` runs before saving and
+  the previous file is restored on failure; snapshots and restore included.
+- **Service** — procd-managed start / stop / restart and autostart; a failed start
+  shows the core log lines.
+- **Logs** — core output from syslog, with optional auto refresh.
+- **Dashboard** — optional sing-box `api` service that serves the official dashboard
+  at `/dashboard/`; optional Clash API for Clash-style panels.
+
+It uses its own binary path and service name (`isongwrt`), so a separately
+installed `sing-box` package is left untouched.
+
+## Platforms
+
+| | |
 |---|---|
-| 内核分级管理 | 内核**一律取自官方 Releases**（`SagerNet/sing-box`，本项目不编译内核）：`stable` / `rc` / `beta` / `alpha` 四级渠道 + 「检查更新」列各分支最新版，自动匹配架构（优先 musl），支持指定版本、多版本共存、回滚 |
-| 配置管理 | 上传或在线编辑配置，保存前自动 `sing-box check`，失败自动回退；自动备份/恢复 |
-| 启停控制 | procd 托管（崩溃拉起、开机自启），启动失败直接回显内核日志原因 |
-| 日志 | 面板查看内核 syslog，支持自动刷新 |
-| Web 面板 | 一键启用 sing-box 内置 `api` 服务：官方 dashboard 自动下载并托管在 `/dashboard/`；可选 Clash API 接 zashboard/metacubexd |
+| OpenWrt / iStoreOS | 24.10 (opkg/ipk), 25.12 (apk) |
+| CI targets | x86_64 (add entries to the matrix for others) |
+| Core manager | x86_64, aarch64, armv7, armv6, mips(el), riscv64, loongarch64 |
 
-与官方 `sing-box` 包**互不干扰**：独立内核路径（`/usr/lib/isongwrt/sing-box`）与服务名（`isongwrt`）。
+## Install
 
-## 兼容性
-
-`openwrt-24.10`（opkg/ipk）· `openwrt-25.12`（apk）· CI 默认构建 **x86_64**（其它架构在矩阵里加一行即可）。
-内核管理器本身支持 x86_64 / aarch64 / armv7 / armv6 / mips(el) / riscv64 / loongarch64。
-
-## 安装
-
-### A. Install From Feed（推荐）
+From the feed:
 
 ```sh
-# 一键：自动识别版本与架构、添加 feed（含签名公钥）并安装；feed 不可达时回退 Releases
 wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
 ```
 
-**下载源可选**（脚本含 GitHub 相关域名时都会让你选，交互运行时弹菜单，管道运行时用参数/环境变量）：
+Optional download-source selection (`mirror` is the default):
 
 ```sh
-# 1) 镜像优先 jsDelivr（默认，国内可用）
-wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
-
-# 2) GitHub 直连优先
-wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh -s -- --source=direct
-
-# 3) 自定义源
-wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh -s -- --source=custom \
-  # 需同时给出：ISONGWRT_FEED_BASE（feed 镜像根）与/或 ISONGWRT_GH_PROXY（GitHub 加速前缀，如 https://ghfast.top/）
+... | sh -s -- --source=direct     # GitHub first
+... | sh -s -- --source=custom     # with ISONGWRT_FEED_BASE / ISONGWRT_GH_PROXY
 ```
 
-> 说明：`raw.githubusercontent.com` 在部分网络（含国内）不可达，因此默认走 **jsDelivr CDN**
-> （自动回退 `fastly.jsdelivr.net` → GitHub 直连）。上述选择对 `feed.sh` 同样适用
-> （`--source=mirror|direct|custom`，或 `ISONGWRT_SOURCE=`）。
-> jsDelivr 对分支引用有缓存（约 12h），刚发布的包可能稍后才可拉到；急用可改用 `--source=direct`
-> 或按 commit 固定引用 `https://cdn.jsdelivr.net/gh/c000127/isongwrt@<commit>/...`。
-
-分两步自己控制：
+Two-step, if you prefer:
 
 ```sh
-wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/feed.sh | sh   # 加源
-opkg install luci-app-isongwrt        # 24.10
-apk add luci-app-isongwrt             # 25.x
+wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/feed.sh | sh
+opkg install luci-app-isongwrt     # 24.10
+apk add luci-app-isongwrt          # 25.x
 ```
 
-feed 由 CI 发布在 `feed` 分支，经 jsDelivr 分发：
-`https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed/<branch>/<arch>/isongwrt`。
+Packages are also attached to [Releases](../../releases) (`latest` = rolling build,
+`v*` = tagged). Refresh LuCI afterwards; menu: **Services → isongwrt**.
+The only dependency is `ca-bundle` — downloads use the built-in `uclient-fetch`.
 
-**关于签名**：feed 索引已用密钥签名（ipk 用 usign，apk 用 PEM），公钥随 feed 发布、`feed.sh` 自动导入。
-签名用于防「镜像/链路被替换成恶意包」；未导入公钥时 apk 需 `--allow-untrusted`（脚本会自动处理）。
-
-### B. 从 Releases 下载
-
-从 [Releases](../../releases) 取包（`latest` 是滚动预发布，`v*` 是正式版）：
-
-```sh
-opkg install luci-app-isongwrt_*_all.ipk        # 24.10
-apk add luci-app-isongwrt-*.apk                 # 25.x
-```
-
-装完刷新 LuCI（`/etc/init.d/uhttpd restart`），菜单：**服务 → isongwrt**。仅依赖 `ca-bundle`（下载走系统自带 `uclient-fetch`，无需 curl）。
-
-### 服务端（落地机）部署
-
-仓库同时提供**服务端一键部署脚本**（在境外落地机部署 sing-box 服务端，配合本面板托管的路由器/手机客户端）：
-
-```bash
-# 交互式选源（直连 GitHub / 加速前缀）
-bash server/singbox-deploy.sh install
-```
-
-- 内核一律使用**官方 Release 原样二进制**（不改名、不自编译），安装为 `/usr/local/bin/sing-box`
-- ss2022（`2022-blake3-aes-256-gcm`）+ `multiplex(h2mux)+padding`，与客户端配置对齐；**无 TLS**
-- 支持 `--with-smartdns`、`--source auto|direct|mirror`、`--dry-run`、`upgrade/rollback/uninstall`
-- 详见 **[server/README.md](server/README.md)**
-
-## C. 自行编译
+## Build
 
 ```sh
 echo "src-git isongwrt https://github.com/c000127/isongwrt.git" >> feeds.conf.default
@@ -93,46 +66,34 @@ echo "src-git isongwrt https://github.com/c000127/isongwrt.git" >> feeds.conf.de
 make menuconfig && make package/luci-app-isongwrt/compile V=s
 ```
 
-CI 在 `main` 推送时构建 → 上传 Artifacts → 发布 Release（`v*` tag 为正式版，否则更新 `latest`）→ 发布 `feed` 分支。
+CI builds on push to `main`, publishes a release and refreshes the `feed` branch.
 
-## 使用
+## Pages
 
-| 页面 | 用途 |
+| Page | Purpose |
 |---|---|
-| 运行状态 | 版本、运行/自启、配置校验、端口占用提示（状态每 5 秒自刷新）；启停/重启按钮即时生效 |
-| 内核管理 | 渠道/指定版本/加速前缀（随「保存并应用」生效）；「检查更新」显示各分支最新版；安装走后台任务（实时进度 + 断点续传）；激活/删除/回滚 |
-| 配置管理 | 分片文件在线编辑或上传；校验并保存（失败自动回退）；快照与恢复 |
-| 日志 | syslog 中的内核日志，可开关自动刷新 |
-| 面板 | 官方 dashboard / Clash API 开关、端口、访问密钥、面板下载源 |
+| Status | version, running/autostart, config check, port-conflict hint; start/stop/restart |
+| Core | channel / pinned version / download prefix; check for updates; install, activate, remove, roll back |
+| Config | edit or upload config shards; validate and save; snapshots |
+| Logs | core log from syslog |
+| Dashboard | dashboard / Clash API switch, port, access secret |
 
-设置类页面均遵循 OpenWrt 标准的 **保存并应用 / 保存 / 复位** 生效方式（与 nikki 一致）；服务操作类按钮即时执行。
-
-首次使用：装内核 → 上传配置 → 勾选开机自启并启动 → 面板页保存并打开 `/dashboard/`。
-
-## 配置模型
+## Layout
 
 ```
 /etc/isongwrt/
-├── conf/                      # sing-box -C 分片目录（按文件名排序合并）
-│   ├── 10-user.json           # 你的配置（面板上传/编辑）
-│   └── 90-isongwrt-api.json   # 面板维护：http_clients + api 服务 / dashboard
-├── installed/                 # 历史内核（回滚用）
-├── backups/                   # 配置备份
-├── active / previous          # 当前与上一版本
+├── conf/                      # sing-box -C directory (files merged in name order)
+│   ├── 10-user.json           # your config
+│   └── 90-isongwrt-api.json   # written by the app: http_clients + api service
+├── installed/                 # installed cores (for rollback)
+├── backups/                   # config backups
+└── active, previous           # current / previous core version
 ```
 
-面板只写 `90-isongwrt-api.json`，升级不会覆盖你的配置。
+Only `90-isongwrt-api.json` is written by the app; an upgrade never overwrites
+your own config.
 
-## 面板实现要点
-
-- sing-box **1.14+** 内置 `api` 服务：开启 dashboard 后内核自动下载官方面板（`gh-pages` zip）并在 `/dashboard/` 托管，默认每天检查更新——因此本项目不打包任何前端。
-- **必须显式声明 HTTP client**：1.14 起「隐式默认客户端」已弃用且会 FATAL；面板分片自带 `http_clients`（tag `isongwrt-dashboard`），只给 dashboard 使用，不覆盖你的 `route.default_http_client`。
-- **默认局域网可访问**：监听地址固定 `0.0.0.0`，**访问密钥在安装时自动生成**（面板页可一键重新生成），浏览器首次打开面板时填该密钥即可。
-- **端口冲突**：`api_port` 默认 `9090` 与 mihomo/nikki 的 Clash API 相同，同机部署请改（如 `9095`），否则启动失败（状态页会提示）。
-- **下载慢/失败**：可换面板资源下载源，或手工把面板文件放进 `<work_dir>/dashboard/`（非空且无 `.etag` 时按原样提供、不自动更新）。
-- 用 Clash 协议面板（zashboard/metacubexd）：开启 Clash API，面板指向 `<路由器>:<clash_port>`。
-
-## 命令行后端
+## Backend CLI
 
 ```sh
 ctl status | channels | releases alpha 10
@@ -147,46 +108,36 @@ ctl api-sync | check | log 200 | service start|stop|restart|enable|disable
 
 ```uci
 config isongwrt 'main'
-	option enabled '0'              # 服务开关
+	option enabled '0'               # service switch
 	option core_path '/usr/lib/isongwrt/sing-box'
 	option conf_dir '/etc/isongwrt/conf'
 	option work_dir '/etc/isongwrt'
-	option channel 'stable'         # stable | rc | beta | alpha
-	option github_proxy ''          # GitHub 加速前缀（可选）
-	option api_listen '0.0.0.0'     # 固定允许局域网访问面板
-	option pin_version ''           # 内核指定版本（留空 = 渠道最新）
+	option channel 'stable'           # stable | rc | beta | alpha
+	option github_proxy ''            # optional download prefix
+	option api_listen '0.0.0.0'
 	option api_port '9090'
 	option api_secret ''
+	option pin_version ''             # empty = latest of the channel
 	option dashboard '1'
-	option dashboard_download_url '' # 面板资源下载源（留空=官方）
+	option dashboard_download_url ''  # empty = official
 	option clash_api '0'
 	option clash_port '9091'
 	option clash_secret ''
 ```
 
-## 结构
+## Server-side script
 
-```
-luci-app-isongwrt/
-├── Makefile                                       # OpenWrt 包（luci.mk）
-├── htdocs/luci-static/resources/
-│   ├── tools/isongwrt.js                          # 前端公共模块
-│   └── view/isongwrt/{overview,core,config,log,dashboard}.js
-└── root/
-    ├── etc/config/isongwrt                        # UCI 默认值
-    ├── etc/init.d/isongwrt                        # procd 服务
-    ├── etc/uci-defaults/99-isongwrt               # 首次初始化
-    ├── usr/lib/isongwrt/ctl                       # 后端（busybox sh）
-    └── usr/share/{luci/menu.d,rpcd/acl.d}/luci-app-isongwrt.json
-feed.sh / install.sh                               # feed 安装脚本
-```
+`server/singbox-deploy.sh` deploys a sing-box server on a VPS using the official
+release binary (ss2022, no TLS). See [server/README.md](server/README.md).
 
-## 已知限制
+## Notes
 
-- 渠道解析用 `releases.atom`（约 20KB，路由器友好），只覆盖最近约 20 个版本；`beta` 等较老渠道为空时用「指定版本」直接填 tag。
-- 未签名场景下 apk 需 `--allow-untrusted`（本仓库默认已配置签名密钥，正常无需关心）。
-- TUN 首次启用建议在带外/本地控制台下进行（会改写路由）。
-- 未做 i18n（界面中文）。
+- Channel versions come from `releases.atom` (about 20 recent tags). For older
+  channels, pin the tag explicitly.
+- Default `api_port` is `9090`, which may collide with another dashboard
+  (mihomo, nikki); change it if the core fails to start.
+- The UI is currently Chinese only.
+- For TUN setups, apply routing changes from local or out-of-band access.
 
 ## License
 
