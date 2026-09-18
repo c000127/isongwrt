@@ -49,7 +49,7 @@ return view.extend({
 
 		function checkText(st) {
 			if (st.config_check === 'ok') return E('span', { 'style': 'color:green' }, '通过');
-			if (st.config_check === 'n/a') return E('span', { 'class': 'cbi-value-description' }, '未安装内核');
+			if (st.config_check === 'n/a') return E('span', { 'style': 'color:#888' }, '未安装内核');
 			return E('span', { 'style': 'color:red' }, '未通过（见「日志」页）');
 		}
 
