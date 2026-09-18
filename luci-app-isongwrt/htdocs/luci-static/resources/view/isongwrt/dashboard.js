@@ -7,6 +7,16 @@ function btn(label, style, fn) {
 	return E('button', { 'class': 'btn cbi-button cbi-button-' + style, 'click': fn }, label);
 }
 
+function row(title, field, desc) {
+	return E('div', { 'class': 'cbi-value' }, [
+		E('label', { 'class': 'cbi-value-title' }, title),
+		E('div', { 'class': 'cbi-value-field' }, [
+			field,
+			desc ? E('div', { 'class': 'cbi-value-description' }, desc) : ''
+		])
+	]);
+}
+
 return view.extend({
 	load: function () {
 		return iso.loadUci();
@@ -38,24 +48,10 @@ return view.extend({
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'api_secret', '访问密钥',
-			'浏览器打开面板时填入；留空 = 保存并应用时自动生成（刷新本页可见），也可用右侧按钮重新生成。');
+			'浏览器打开面板时填入；留空 = 保存并应用时自动生成（刷新本页可见），也可用下方按钮重新生成。');
 
 		o = s.option(form.Value, 'dashboard_download_url', '面板资源地址',
 			'留空 = 官方 gh-pages zip；亦可手工放入工作目录的 dashboard/ 目录。');
-
-		o = s.option(form.DummyValue, '_actions', '操作');
-		o.cfgvalue = function () {
-			return E('div', {}, [
-				btn('生成新密钥', 'action', function () {
-					return iso.busy(iso.call(['api-secret-new']), '生成新密钥…').then(function (r) {
-						iso.notify(r, '已生成新密钥，保存并应用后生效');
-						window.location.reload();
-					});
-				}),
-				' ',
-				E('a', { 'class': 'btn cbi-button', 'href': panelUrl(), 'target': '_blank' }, '打开面板')
-			]);
-		};
 
 		s = m.section(form.NamedSection, 'main', 'isongwrt', 'Clash API（可选）');
 		s.anonymous = true;
@@ -73,6 +69,25 @@ return view.extend({
 		o = s.option(form.Value, 'clash_secret', 'Clash 密钥',
 			'留空 = 不鉴权（仅建议在本机/受信网络使用）。');
 
-		return m.render();
+		return m.render().then(function (mapNode) {
+			var url = panelUrl();
+			return E('div', {}, [
+				mapNode,
+				E('div', { 'class': 'cbi-section' }, [
+					row('操作', E('div', {}, [
+						btn('生成新密钥', 'action', function () {
+							return iso.busy(iso.call(['api-secret-new']), '生成新密钥…').then(function (r) {
+								iso.notify(r, '已生成新密钥，保存并应用后生效');
+								window.location.reload();
+							});
+						}),
+						' ',
+						E('a', { 'class': 'btn cbi-button', 'href': url, 'target': '_blank' }, '打开面板')
+					])),
+					row('面板入口', E('a', { 'href': url, 'target': '_blank' }, url),
+						'浏览器首次打开需输入上方「访问密钥」；局域网内其它设备同样可访问。')
+				])
+			]);
+		});
 	}
 });
