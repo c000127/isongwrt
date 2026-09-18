@@ -69,6 +69,11 @@ bash singbox-deploy.sh install --dry-run    # 只打印将要做的操作（不�
 | `--binary /path/to/sing-box` | — | 使用你自备的二进制（跳过官方下载） |
 | `--with-smartdns` | 关 | 部署本机 smartdns 作为服务端 DNS |
 | `--smartdns-port N` | `6053` | smartdns 监听端口（避开 53） |
+| `--with-ntp` | 关 | 启用 sing-box **内建 NTP 客户端**（校时；见 §5.2） |
+| `--ntp-server` | `pool.ntp.org` | NTP 服务器（`--with-ntp` 时生效） |
+| `--ntp-port` | `123` | NTP 端口 |
+| `--ntp-interval` | `30m` | 校时间隔 |
+| `--ntp-write-system` | 关 | 同时把校正后的时间**写回系统时钟**（隐含 `--with-ntp`；会给 unit 加 `CAP_SYS_TIME`） |
 | `--open-firewall` | 关 | 检测到启用中的 ufw 时放行端口（会明确提示） |
 | `--no-service` | 关 | 不装 systemd 单元，只生成配置与二进制 |
 | `--dry-run` | 关 | 只打印计划；不写配置/密钥/单元，不改服务 |
@@ -112,6 +117,7 @@ journalctl -u sing-box -n 50 --no-pager | grep -E 'FATAL|ERROR'
 | `02_outbounds.json` | `direct` / `block` | 落地机不需要复杂出站 |
 | `03_route.json` | `sniff` → 拦 BT → 拦广告域名 → 拦私有地址 → `resolve` → 拦 `geoip-cn`；`final=direct` | 含 `http_clients` + `default_http_client`（1.14+ 下载规则集必需） |
 | `04_dns.json` | 默认 `8.8.8.8`/`1.1.1.1`；`--with-smartdns` 时为 `127.0.0.1:6053` | 与 `route.default_domain_resolver` 对应 |
+| `05_ntp.json` | 仅 `--with-ntp` 时生成：`{"ntp":{"enabled":true,"server":"pool.ntp.org","server_port":123,"interval":"30m"}}` | 见 §5.2；`--ntp-write-system` 会追加 `"write_to_system": true` |
 
 ### 5.1 `--with-smartdns` 会改哪些文件（与 apt 原样配置的关系）
 
@@ -136,6 +142,25 @@ journalctl -u sing-box -n 50 --no-pager | grep -E 'FATAL|ERROR'
 权限：目录 `750`、配置文件 `640`（属主 `root:sing-box`）、密钥与部署记录 `600`。
 
 ---
+
+### 5.2 `--with-ntp`：内建 NTP 校时
+
+**为什么需要**：VPS 休眠/迁移后时钟漂移会直接破坏 ss2022 的**重放窗口**与 TLS 握手（表现为客户端能连上却无法认证/握手失败）。
+sing-box 自 1.12+ 起内建 NTP 客户端（顶层 `ntp` 段），不必额外装 chrony/timesyncd。
+
+```json
+// /etc/sing-box/conf/05_ntp.json
+{ "ntp": { "enabled": true, "server": "pool.ntp.org", "server_port": 123, "interval": "30m" } }
+```
+
+- **实测**：加入该段后启动日志出现 `INFO ntp: updated time: 2026-09-18 21:09:33 +0800`（沙箱真机验证）
+- **注意**：`ntp` 是**顶层配置段**，不是 `services` 条目 —— 写成 `services:[{type:"ntp"}]` 会报
+  `unknown inbound type: ntp`（实测）
+- 默认**只校正 sing-box 自身使用的时间**（这正是 ss2022/TLS 需要的）。若还要把时间写回**系统时钟**，
+  用 `--ntp-write-system`：配置里加 `"write_to_system": true`，并给 unit 追加
+  `AmbientCapabilities=CAP_SYS_TIME` + `CapabilityBoundingSet=CAP_SYS_TIME`（服务以 `sing-box` 非特权用户运行，
+  没有这个能力写系统时钟会失败）
+- 默认服务器 `pool.ntp.org`（anycast、全球可达）；可 `--ntp-server` 换成你信任的源
 
 ## 6. 与客户端对接
 

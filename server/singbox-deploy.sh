@@ -6,7 +6,7 @@
 #     singbox-deploy.sh install   [--listen-port 15835] [--with-smartdns] [--no-service]
 #                                 [--smartdns-port 6053] [--version v1.15.0-alpha.6]
 #                                 [--source auto|direct|mirror] [--binary /path/to/sing-box]
-#                                 [--open-firewall] [--dry-run]
+#                                 [--with-ntp] [--open-firewall] [--dry-run]
 #     singbox-deploy.sh upgrade   [同上]
 #     singbox-deploy.sh rollback
 #     singbox-deploy.sh status | check | uninstall
@@ -38,6 +38,11 @@ PIN_VERSION=""
 OPEN_FIREWALL=0
 DRY_RUN=0
 NO_SERVICE=0
+WITH_NTP=0
+NTP_SERVER="${ISONGWRT_NTP_SERVER:-pool.ntp.org}"
+NTP_PORT="${ISONGWRT_NTP_PORT:-123}"
+NTP_INTERVAL="${ISONGWRT_NTP_INTERVAL:-30m}"
+NTP_WRITE_SYSTEM=0        # 1 = 同时把校正后的时间写回系统时钟（需要 CAP_SYS_TIME）
 SOURCE="${ISONGWRT_SOURCE:-auto}"          # auto | direct | mirror
 GH_PROXY="${ISONGWRT_GH_PROXY:-https://ghfast.top/}"
 GH_REPO="SagerNet/sing-box"
@@ -84,6 +89,11 @@ parse_args() {
       --open-firewall) OPEN_FIREWALL=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --no-service) NO_SERVICE=1; shift ;;
+      --with-ntp) WITH_NTP=1; shift ;;
+      --ntp-server) NTP_SERVER="$2"; shift 2 ;;
+      --ntp-port) NTP_PORT="$2"; shift 2 ;;
+      --ntp-interval) NTP_INTERVAL="$2"; shift 2 ;;
+      --ntp-write-system) NTP_WRITE_SYSTEM=1; WITH_NTP=1; shift ;;
       --help|-h) usage ;;
       *) die "未知参数: $1（--help 查看用法）" ;;
     esac
@@ -316,6 +326,24 @@ EOF
 EOF
   fi
 
+  if [[ $WITH_NTP -eq 1 ]]; then
+    # 内建 NTP 客户端：VPS 时钟漂移会破坏 ss2022 重放窗口与 TLS 握手，这里由内核自身校时
+    if [[ $NTP_WRITE_SYSTEM -eq 1 ]]; then
+      _write "${cdir}/05_ntp.json" <<EOF
+{
+  "ntp": { "enabled": true, "server": "${NTP_SERVER}", "server_port": ${NTP_PORT},
+           "interval": "${NTP_INTERVAL}", "write_to_system": true }
+}
+EOF
+    else
+      _write "${cdir}/05_ntp.json" <<EOF
+{
+  "ntp": { "enabled": true, "server": "${NTP_SERVER}", "server_port": ${NTP_PORT}, "interval": "${NTP_INTERVAL}" }
+}
+EOF
+    fi
+  fi
+
   if [[ $DRY_RUN -eq 0 ]]; then
     chown -R root:"$SRV_USER" "$CONF_DIR" 2>/dev/null || true
     chmod 750 "$CONF_DIR"; chmod 640 "${cdir}"/*.json
@@ -349,6 +377,7 @@ Restart=on-failure
 RestartSec=10
 LimitNOFILE=infinity
 WorkingDirectory=${WORK_DIR}
+$( [[ $NTP_WRITE_SYSTEM -eq 1 ]] && printf 'AmbientCapabilities=CAP_SYS_TIME\nCapabilityBoundingSet=CAP_SYS_TIME\n' )
 
 [Install]
 WantedBy=multi-user.target
@@ -443,9 +472,12 @@ open_firewall() {
 write_record() {
   [[ $DRY_RUN -eq 1 ]] && { printf '\033[36m[dry-run]\033[0m 写部署记录 %s\n' "$RECORD"; return; }
   install -d -m 0700 "$DATA_DIR"
-  local conf_sha bin_sha
+  local conf_sha bin_sha build_meta
   conf_sha="$(cat "${CONF_DIR}"/${CONF_SUBDIR}/*.json | sha256sum | cut -d' ' -f1)"
   bin_sha="$(sha256sum "$BIN" | cut -d' ' -f1)"
+  # 注意：不要写 ${VAR:-{...}} —— shell 会在内层 } 处提前结束展开，把多余的 } 留在 JSON 里
+  build_meta="${BUILD_META_JSON:-}"
+  [[ -n "$build_meta" ]] || build_meta='{"source":"unknown"}'
   cat > "$RECORD" <<EOF
 {
   "action": "installed",
@@ -453,9 +485,11 @@ write_record() {
   "role": "${ROLE}",
   "listen_port": ${LISTEN_PORT},
   "method": "${METHOD}",
-  "build": ${BUILD_META_JSON:-{\"source\":\"unknown\"}},
+  "build": ${build_meta},
   "binary_sha256": "${bin_sha}",
   "config_sha256": "${conf_sha}",
+  "ntp": $( [[ $WITH_NTP -eq 1 ]] && echo true || echo false ),
+  "ntp_server": "${NTP_SERVER}",
   "smartdns": $( [[ $WITH_SMARTDNS -eq 1 ]] && echo true || echo false ),
   "smartdns_port": ${SMARTDNS_PORT},
   "installed_at": "$(date -Is)"
@@ -512,7 +546,7 @@ do_install() {
     health_check
   fi
   write_record
-  log "完成：服务端 ${VERSION_TAG} 已就绪（端口 ${LISTEN_PORT}，方法 ${METHOD}）"
+  log "完成：服务端 ${VERSION_TAG} 已就绪（端口 ${LISTEN_PORT}，方法 ${METHOD}$( [[ $WITH_NTP -eq 1 ]] && printf '，NTP %s' "$NTP_SERVER" )）"
 }
 
 do_upgrade() {
