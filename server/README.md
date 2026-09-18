@@ -18,6 +18,7 @@
 | 多路复用 | `multiplex: {enabled, padding}` 服务端开启 | 与客户端 `h2mux + padding` 对齐 |
 | TLS | **不使用** | 按既定裁决：ss2022 自身加密即可，减少握手与特征 |
 | 路由 | 默认 `direct`，拦 `bittorrent` / 广告域名 / 私有地址 / `geoip-cn` | 防止落地机被当作回国中转，减少滥用面 |
+| 校时 | **默认启用内建 NTP**（`pool.ntp.org`，30m 间隔） | 见 §5.2；`--no-ntp` 可关；`--ntp-write-system` 可同时纠系统时钟 |
 | DNS | 默认 `8.8.8.8` + `1.1.1.1`；可选 smartdns | `--with-smartdns` 时监听 `127.0.0.1:6053`，**避开 53 端口冲突**；见 §5.1 |
 | 幂等 | 密钥已存在即复用（不轮换） | 重复运行安全；改配置也不会换密钥 |
 | 可回滚 | `rollback` 子命令 + `${BIN}.prev` + 配置备份 | 升级/改动前自动备份 |
@@ -69,7 +70,8 @@ bash singbox-deploy.sh install --dry-run    # 只打印将要做的操作（不�
 | `--binary /path/to/sing-box` | — | 使用你自备的二进制（跳过官方下载） |
 | `--with-smartdns` | 关 | 部署本机 smartdns 作为服务端 DNS |
 | `--smartdns-port N` | `6053` | smartdns 监听端口（避开 53） |
-| `--with-ntp` | 关 | 启用 sing-box **内建 NTP 客户端**（校时；见 §5.2） |
+| `--with-ntp` | **开** | sing-box **内建 NTP 客户端**校时（默认已启用；见 §5.2） |
+| `--no-ntp` | — | 关闭内建 NTP（不生成 `05_ntp.json`） |
 | `--ntp-server` | `pool.ntp.org` | NTP 服务器（`--with-ntp` 时生效） |
 | `--ntp-port` | `123` | NTP 端口 |
 | `--ntp-interval` | `30m` | 校时间隔 |
@@ -117,7 +119,7 @@ journalctl -u sing-box -n 50 --no-pager | grep -E 'FATAL|ERROR'
 | `02_outbounds.json` | `direct` / `block` | 落地机不需要复杂出站 |
 | `03_route.json` | `sniff` → 拦 BT → 拦广告域名 → 拦私有地址 → `resolve` → 拦 `geoip-cn`；`final=direct` | 含 `http_clients` + `default_http_client`（1.14+ 下载规则集必需） |
 | `04_dns.json` | 默认 `8.8.8.8`/`1.1.1.1`；`--with-smartdns` 时为 `127.0.0.1:6053` | 与 `route.default_domain_resolver` 对应 |
-| `05_ntp.json` | 仅 `--with-ntp` 时生成：`{"ntp":{"enabled":true,"server":"pool.ntp.org","server_port":123,"interval":"30m"}}` | 见 §5.2；`--ntp-write-system` 会追加 `"write_to_system": true` |
+| `05_ntp.json` | **默认生成**（`--no-ntp` 时不生成）：`{"ntp":{"enabled":true,"server":"pool.ntp.org","server_port":123,"interval":"30m"}}` | 见 §5.2；`--ntp-write-system` 会追加 `"write_to_system": true` |
 
 ### 5.1 `--with-smartdns` 会改哪些文件（与 apt 原样配置的关系）
 
@@ -143,15 +145,16 @@ journalctl -u sing-box -n 50 --no-pager | grep -E 'FATAL|ERROR'
 
 ---
 
-### 5.2 `--with-ntp`：内建 NTP 校时
+### 5.2 内建 NTP 校时（**默认开启**）
 
 **为什么需要**：VPS 休眠/迁移后时钟漂移会直接破坏 ss2022 的**重放窗口**与 TLS 握手（表现为客户端能连上却无法认证/握手失败）。
 sing-box 自 1.12+ 起内建 NTP 客户端（顶层 `ntp` 段），不必额外装 chrony/timesyncd。
 
 ```json
-// /etc/sing-box/conf/05_ntp.json
+// /etc/sing-box/conf/05_ntp.json —— 默认就会生成
 { "ntp": { "enabled": true, "server": "pool.ntp.org", "server_port": 123, "interval": "30m" } }
 ```
+不需要校时（例如已有 chrony/NTP 由系统统一管理）时用 `--no-ntp` 关闭。
 
 - **实测**：加入该段后启动日志出现 `INFO ntp: updated time: 2026-09-18 21:09:33 +0800`（沙箱真机验证）
 - **注意**：`ntp` 是**顶层配置段**，不是 `services` 条目 —— 写成 `services:[{type:"ntp"}]` 会报

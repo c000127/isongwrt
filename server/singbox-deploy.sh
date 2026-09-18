@@ -6,7 +6,7 @@
 #     singbox-deploy.sh install   [--listen-port 15835] [--with-smartdns] [--no-service]
 #                                 [--smartdns-port 6053] [--version v1.15.0-alpha.6]
 #                                 [--source auto|direct|mirror] [--binary /path/to/sing-box]
-#                                 [--with-ntp] [--open-firewall] [--dry-run]
+#                                 [--no-ntp] [--open-firewall] [--dry-run]
 #     singbox-deploy.sh upgrade   [同上]
 #     singbox-deploy.sh rollback
 #     singbox-deploy.sh status | check | uninstall
@@ -38,7 +38,7 @@ PIN_VERSION=""
 OPEN_FIREWALL=0
 DRY_RUN=0
 NO_SERVICE=0
-WITH_NTP=0
+WITH_NTP=1                # 默认开启内建 NTP 校时（--no-ntp 可关）
 NTP_SERVER="${ISONGWRT_NTP_SERVER:-pool.ntp.org}"
 NTP_PORT="${ISONGWRT_NTP_PORT:-123}"
 NTP_INTERVAL="${ISONGWRT_NTP_INTERVAL:-30m}"
@@ -89,7 +89,8 @@ parse_args() {
       --open-firewall) OPEN_FIREWALL=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --no-service) NO_SERVICE=1; shift ;;
-      --with-ntp) WITH_NTP=1; shift ;;
+      --with-ntp) WITH_NTP=1; shift ;;          # 默认已开启，显式指定亦可
+      --no-ntp) WITH_NTP=0; shift ;;
       --ntp-server) NTP_SERVER="$2"; shift 2 ;;
       --ntp-port) NTP_PORT="$2"; shift 2 ;;
       --ntp-interval) NTP_INTERVAL="$2"; shift 2 ;;
@@ -327,7 +328,7 @@ EOF
   fi
 
   if [[ $WITH_NTP -eq 1 ]]; then
-    # 内建 NTP 客户端：VPS 时钟漂移会破坏 ss2022 重放窗口与 TLS 握手，这里由内核自身校时
+    # 内建 NTP 客户端（默认开启）：VPS 时钟漂移会破坏 ss2022 重放窗口与 TLS 握手，由内核自身校时
     if [[ $NTP_WRITE_SYSTEM -eq 1 ]]; then
       _write "${cdir}/05_ntp.json" <<EOF
 {
