@@ -1,11 +1,11 @@
 #!/bin/sh
-# isongwrt feed 添加脚本（OpenWrt 24.10 opkg / 25.x apk）
-# 用法：wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/feed.sh | sh
-# 源选择（三选一，可交互选择或用参数/环境变量指定）：
-#   --source=mirror   镜像优先（默认）：jsDelivr → fastly.jsdelivr → GitHub 直连
-#   --source=direct   GitHub 直连优先：raw.githubusercontent → jsDelivr
-#   --source=custom   自定义：ISONGWRT_FEED_BASE（可多个，空格分隔）
-# 环境变量等价的 ISONGWRT_SOURCE；非交互（管道执行）时不会提问，直接按默认/环境变量。
+# isongwrt feed setup (OpenWrt 24.10 opkg / 25.x apk)
+# Usage: wget -O - https://raw.githubusercontent.com/c000127/isongwrt/main/feed.sh | sh
+# --source (or ISONGWRT_SOURCE):
+#   mirror  jsDelivr -> fastly.jsdelivr -> GitHub (default)
+#   direct  raw.githubusercontent -> jsDelivr
+#   custom  ISONGWRT_FEED_BASE (one or more, space separated)
+# Piped runs never prompt; they use the default or the environment variable.
 set -e
 
 SOURCE="${ISONGWRT_SOURCE:-}"
@@ -18,7 +18,7 @@ for arg in "$@"; do
 done
 
 if [ ! -x /bin/opkg ] && [ ! -x /usr/bin/apk ]; then
-	echo "错误：未找到 opkg 或 apk（仅支持 OpenWrt/iStoreOS）" >&2
+	echo "error: neither opkg nor apk found (OpenWrt/iStoreOS only)" >&2
 	exit 1
 fi
 
@@ -28,12 +28,12 @@ case "${DISTRIB_RELEASE:-}" in
 	*24.10*) branch="openwrt-24.10" ;;
 	*25.12*) branch="openwrt-25.12" ;;
 	*)
-		echo "暂不支持的发行版: ${DISTRIB_RELEASE:-unknown}（可用 install.sh 从 Releases 安装）" >&2
+		echo "unsupported release: ${DISTRIB_RELEASE:-unknown} (install.sh can install from Releases)" >&2
 		exit 1
 		;;
 esac
 
-fetch() { # <url> <outfile>：依次尝试 curl / uclient-fetch / wget（有的系统 uclient-fetch 缺 libustream）
+fetch() { # <url> <outfile>: try curl, then uclient-fetch, then wget
 	if command -v curl >/dev/null 2>&1 && curl -fsSL --max-time 60 -o "$2" "$1"; then return 0; fi
 	if command -v uclient-fetch >/dev/null 2>&1 && uclient-fetch -q -O "$2" "$1"; then return 0; fi
 	if command -v wget >/dev/null 2>&1 && wget -q -T 60 -O "$2" "$1"; then return 0; fi
@@ -44,9 +44,9 @@ JSD="https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed"
 JSD2="https://fastly.jsdelivr.net/gh/c000127/isongwrt@feed"
 RAW="https://raw.githubusercontent.com/c000127/isongwrt/feed"
 
-# 交互选择（仅在能从 /dev/tty 读取时询问，管道执行不受影响）
+# interactive selection: only when /dev/tty is readable
 if [ -z "$SOURCE" ] && [ -r /dev/tty ]; then
-	printf '请选择 feed 下载源：\n  1) 镜像优先 jsDelivr（推荐，国内可用）\n  2) GitHub 直连\n  3) 自定义（ISONGWRT_FEED_BASE）\n输入序号 [1]: ' > /dev/tty
+	printf 'Select feed source:\n  1) jsDelivr mirror (default)\n  2) GitHub direct\n  3) custom (ISONGWRT_FEED_BASE)\nNumber [1]: ' > /dev/tty
 	if read -r _ans < /dev/tty 2>/dev/null; then
 		case "$_ans" in
 			2) SOURCE=direct ;;
@@ -62,12 +62,12 @@ case "$SOURCE" in
 	custom) FEED_BASES="${ISONGWRT_FEED_BASE:-$JSD}" ;;
 	*)      FEED_BASES="${ISONGWRT_FEED_BASE:-$JSD $JSD2 $RAW}" ;;
 esac
-echo "使用源：$SOURCE → $FEED_BASES"
+echo "Source: $SOURCE -> $FEED_BASES"
 
 feed_url=""
 for base in $FEED_BASES; do
 	candidate="$base/$branch/$arch/isongwrt"
-	# 探测索引是否可下载
+	# probe whether the index is reachable
 	if [ -x /bin/opkg ]; then
 		probe="$candidate/Packages.gz"
 	else
@@ -79,29 +79,29 @@ for base in $FEED_BASES; do
 		break
 	fi
 done
-[ -n "$feed_url" ] || { echo "错误：无法访问 feed（$FEED_BASES）" >&2; exit 1; }
+[ -n "$feed_url" ] || { echo "error: no reachable feed ($FEED_BASES)" >&2; exit 1; }
 
 feed_root="${feed_url%/$branch/$arch/isongwrt}"
 if [ -x /bin/opkg ]; then
-	# 公钥（若 feed 提供签名）
+	# public key, when the feed is signed
 	if fetch "$feed_root/key-build.pub" /tmp/key-build.pub 2>/dev/null; then
 		opkg-key add /tmp/key-build.pub 2>/dev/null || true
 		rm -f /tmp/key-build.pub
 	fi
 	grep -q isongwrt /etc/opkg/customfeeds.conf 2>/dev/null && sed -i '/isongwrt/d' /etc/opkg/customfeeds.conf
 	echo "src/gz isongwrt $feed_url" >> /etc/opkg/customfeeds.conf
-	echo "已添加 feed：$feed_url"
+	echo "Feed added: $feed_url"
 	opkg update
 else
 	if fetch "$feed_root/public-key.pem" /etc/apk/keys/isongwrt.pem 2>/dev/null; then
-		echo "已安装 feed 公钥 /etc/apk/keys/isongwrt.pem"
+		echo "Installed feed public key /etc/apk/keys/isongwrt.pem"
 	fi
 	mkdir -p /etc/apk/repositories.d
 	grep -q isongwrt /etc/apk/repositories.d/customfeeds.list 2>/dev/null && sed -i '/isongwrt/d' /etc/apk/repositories.d/customfeeds.list
 	echo "$feed_url/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
-	echo "已添加 feed：$feed_url/packages.adb"
-	# 未签名 feed 需要 --allow-untrusted；已装公钥时普通 update 即可
+	echo "Feed added: $feed_url/packages.adb"
+	# unsigned feed needs --allow-untrusted; a plain update works once the key is installed
 	apk update 2>/dev/null || apk --allow-untrusted update
 fi
 
-echo "完成。安装：opkg install luci-app-isongwrt  或  apk add luci-app-isongwrt"
+echo "Done. Install with: opkg install luci-app-isongwrt  |  apk add luci-app-isongwrt"
