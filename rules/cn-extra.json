@@ -4,7 +4,10 @@
     {
       "domain_suffix": [
         "customer.yostar.net",
-        "daguoxiaoxian.com"
+        "daguoxiaoxian.com",
+        "open.yostar.net",
+        "udata-api.open.yostar.net",
+        "yostar.net"
       ]
     }
   ]
