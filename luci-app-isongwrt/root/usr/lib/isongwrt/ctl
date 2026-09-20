@@ -192,7 +192,10 @@ fetch_releases_atom() { # [force]：force 跳过 TTL 检查，但失败时保留
 	[ -f "$ATOM_CACHE" ] && _age=$(( _now - $(date -r "$ATOM_CACHE" +%s 2>/dev/null || echo 0) ))
 	if [ "$_force" = "force" ] || [ "$_age" -gt 600 ]; then
 		_at=$(tmp_near "$ATOM_CACHE") || return 1
-		if dl_get "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" "$_at" 20 2>/dev/null && [ -s "$_at" ]; then
+		# github.com acceleration prefixes (e.g. ghfast.top) answer "403 Invalid input." for
+		# releases.atom, so try the direct URL first and fall back to the prefix only if that fails.
+		if { dl_get "https://github.com/$GH_REPO/releases.atom" "$_at" 20 2>/dev/null || \
+		     dl_get "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" "$_at" 20 2>/dev/null; } && [ -s "$_at" ]; then
 			mv -f "$_at" "$ATOM_CACHE" 2>/dev/null || rm -f "$_at"
 			FETCH_STALE=0
 		else
@@ -214,7 +217,10 @@ fetch_releases_rest() {
 	[ -f "$_f" ] && _age=$(( _now - $(date -r "$_f" +%s 2>/dev/null || echo 0) ))
 	if [ "$_age" -gt 600 ]; then
 		_rt=$(tmp_near "$_f") || return 1
-		if dl_get "${GH_PROXY}${GH_API}?per_page=100" "$_rt" 25 2>/dev/null && [ -s "$_rt" ]; then
+		# Same prefix caveat as the atom feed: api.github.com is not handled by github.com
+		# accelerators, so query directly first and use the prefix only as a fallback.
+		if { dl_get "${GH_API}?per_page=100" "$_rt" 25 2>/dev/null || \
+		     dl_get "${GH_PROXY}${GH_API}?per_page=100" "$_rt" 25 2>/dev/null; } && [ -s "$_rt" ]; then
 			mv -f "$_rt" "$_f" 2>/dev/null || rm -f "$_rt"
 		else
 			rm -f "$_rt"
