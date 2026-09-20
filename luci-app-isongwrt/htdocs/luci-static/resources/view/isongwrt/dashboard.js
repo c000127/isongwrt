@@ -26,11 +26,20 @@ return view.extend({
 		var m, s, o, self = this;
 		var st = (data && data[1]) || {};
 		self.apiSource = st.api_source || 'none';
-		self.clashSource = st.clash_source || 'none';
 
+		/* The sing-box API/dashboard is plain HTTP (no TLS), so the link is built
+		   with an explicit http:// scheme and reads the port from the live form
+		   value — editing the port must not require a save first. */
 		function panelUrl() {
-			return window.location.protocol + '//' + window.location.hostname + ':' +
-				iso.get('api_port', '9090') + '/dashboard/';
+			var port = '';
+			try {
+				port = (portOpt && portOpt.formvalue('main')) || '';
+			} catch (e) {
+				console.warn('isongwrt: could not read the live api_port value, using the saved one', e);
+			}
+			if (!port)
+				port = iso.get('api_port', '9090');
+			return 'http://' + window.location.hostname + ':' + port + '/dashboard/';
 		}
 
 		m = new form.Map('isongwrt', '面板',
@@ -38,49 +47,61 @@ return view.extend({
 			'监听 0.0.0.0，局域网可访问；访问密钥已自动生成。');
 
 		s = m.section(form.NamedSection, 'main', 'isongwrt', 'API / 官方面板');
-		s.anonymous = true;
 
 		o = s.option(form.Flag, 'dashboard', '启用官方面板');
 		o.default = '1';
 		o.rmempty = false;
 
 		o = s.option(form.Value, 'api_port', '监听端口',
-			'默认 9090 与 mihomo/nikki 的 Clash API 相同，同机部署请改（如 9095）。');
+			'Default 9090 — change it (e.g. 9095) if another service on this device already listens there.');
 		o.datatype = 'port';
 		o.default = '9090';
 		o.rmempty = false;
+		var portOpt = o;
 
 		o = s.option(form.Value, 'api_secret', '访问密钥',
 			'浏览器打开面板时填入；留空 = 保存并应用时自动生成（刷新本页可见），也可用下方按钮重新生成。');
+		o.password = true;
+		var secretOpt = o;
+
+		/* Show a freshly generated secret in place instead of reloading the page,
+		   which would silently drop unsaved edits of the other fields. Setting it
+		   through the widget keeps formvalue() in sync, so a later "Save & Apply"
+		   writes the new secret back instead of the stale one. */
+		function refreshSecretField(value) {
+			var widget = secretOpt.getUIElement('main');
+			if (widget && typeof widget.setValue === 'function') {
+				widget.setValue(value);
+				return;
+			}
+			/* Fallback: the rendered input carries the id "widget.<cbid>" */
+			var node = document.getElementById('widget.cbid.isongwrt.main.api_secret');
+			if (node) {
+				node.value = value;
+				return;
+			}
+			console.warn('isongwrt: api_secret input not found; the new secret is only stored in UCI');
+		}
 
 		o = s.option(form.Value, 'dashboard_download_url', '面板资源地址',
 			'留空 = 官方 gh-pages zip；亦可手工放入工作目录的 dashboard/ 目录。');
 
-		s = m.section(form.NamedSection, 'main', 'isongwrt', 'Clash API（可选）');
-		s.anonymous = true;
-
-		o = s.option(form.Flag, 'clash_api', '启用 Clash API',
-			'供 zashboard / metacubexd 等 Clash 协议面板使用。');
-		o.default = '0';
-		o.rmempty = false;
-
-		o = s.option(form.Value, 'clash_port', 'Clash 端口');
-		o.datatype = 'port';
-		o.default = '9091';
-		o.rmempty = false;
-
-		o = s.option(form.Value, 'clash_secret', 'Clash 密钥',
-			'留空 = 不鉴权（仅建议在本机/受信网络使用）。');
-
 		return m.render().then(function (mapNode) {
-			var url = panelUrl();
 			var notices = [];
 			if (self.apiSource === 'config')
 				notices.push(E('div', { 'class': 'cbi-section' }, E('div', { 'style': 'color:#c60' },
 					'检测到你的配置里已定义 API 服务：面板不会注入或覆盖它，本页「启用官方面板 / 监听端口 / 访问密钥」仅在由面板生成时才生效。')));
-			else if (self.clashSource === 'config')
-				notices.push(E('div', { 'class': 'cbi-section' }, E('div', { 'style': 'color:#888' },
-					'检测到你的配置里已定义 clash_api：面板不再注入 Clash API（下方开关保持关闭即可）。')));
+
+			var panelLink = E('a', { 'href': panelUrl(), 'target': '_blank' }, panelUrl());
+			function refreshPanelLink() {
+				var url = panelUrl();
+				panelLink.href = url;
+				panelLink.textContent = url;
+			}
+			/* Keep the link in sync with the port currently typed in the form */
+			mapNode.addEventListener('input', refreshPanelLink);
+			mapNode.addEventListener('change', refreshPanelLink);
+
 			return E('div', {}, notices.concat([
 				mapNode,
 				E('div', { 'class': 'cbi-section' }, [
@@ -88,13 +109,17 @@ return view.extend({
 						btn('生成新密钥', 'action', function () {
 							return iso.busy(iso.call(['api-secret-new']), '生成新密钥…').then(function (r) {
 								iso.notify(r, '已生成新密钥，保存并应用后生效');
-								window.location.reload();
+								if (r && r.ok && r.secret)
+									refreshSecretField(r.secret);
 							});
 						}),
 						' ',
-						E('a', { 'class': 'btn cbi-button', 'href': url, 'target': '_blank' }, '打开面板')
+						btn('打开面板', 'action', function () {
+							refreshPanelLink();
+							window.open(panelLink.href, '_blank');
+						})
 					])),
-					row('面板入口', E('a', { 'href': url, 'target': '_blank' }, url),
+					row('面板入口', panelLink,
 						'浏览器首次打开需输入上方「访问密钥」；局域网内其它设备同样可访问。')
 				])
 			]));

@@ -21,26 +21,82 @@ UA="isongwrt/0.1.0"
 
 cfg()  { uci -q get "isongwrt.main.$1" 2>/dev/null; }
 cfgd() { _v=$(cfg "$1"); [ -n "${_v:-}" ] && printf '%s' "$_v" || printf '%s' "$2"; }
-json_esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g'; }
-json_ml()  { awk '{ gsub(/\\/,"\\\\"); gsub(/"/,"\\\""); gsub(/\t/,"\\t"); printf "%s\\n", $0 }' | sed -e 's/\\n$//'; }
+# stdin -> JSON string body. Escaping is done with sed because busybox awk drops the backslash
+# of "\\t"/"\\\"" in gsub() replacements (which produced invalid JSON on the log/config pages);
+# awk is only used to join the lines with a literal \n, and the final sed drops the trailing one.
+_json_escape_stream() {
+	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e "s/$(printf '\r')/\\\\r/g" \
+		| awk '{ printf "%s\\n", $0 }' | sed -e 's/\\n$//'
+}
+json_esc() { printf '%s' "$1" | _json_escape_stream; }
+json_ml()  { _json_escape_stream; }
 die() { printf '{"ok":false,"error":"%s"}\n' "$(json_esc "$1")" >&2; exit 1; }
 ok()  { printf '{"ok":true%s}\n' "${1:-}"; }
+
+# ---------- helpers: symlink guard / atomic writes ----------
+no_symlink() { # <path>: the cache lives in world-writable /tmp, never write through a symlink
+	[ -L "$1" ] || return 0
+	die "Refusing to operate on symlink: $1"
+}
+tmp_near() { # <target>: temp file in the same directory, so the following mv is atomic
+	[ -L "$1" ] && return 1
+	mktemp "$1.XXXXXX" 2>/dev/null
+}
+replace_file() { # <src> <target>: atomic replace, keep the target mode when it can be read
+	[ -f "$1" ] || return 1
+	_rf_mode=$(stat -c '%a' "$2" 2>/dev/null || :)
+	[ -n "${_rf_mode:-}" ] || _rf_mode=600
+	chmod "$_rf_mode" "$1" 2>/dev/null
+	mv -f "$1" "$2" || return 1
+	return 0
+}
+replace_private() { # <src> <target>: atomic replace, force 600 (the file holds the API secret)
+	[ -f "$1" ] || return 1
+	chmod 600 "$1" 2>/dev/null
+	mv -f "$1" "$2" || return 1
+	return 0
+}
 
 CORE_PATH=$(cfgd core_path /usr/lib/isongwrt/sing-box)
 CONF_DIR=$(cfgd conf_dir "$CONF_DIR_DEFAULT")
 WORK_DIR=$(cfgd work_dir "$STATE_DIR")
 CHANNEL=$(cfgd channel stable)
+# Acceleration prefix for github.com/api.github.com. It is prepended to an https URL, so a value
+# without the scheme would silently downgrade downloads to plain http: reject anything but https.
 GH_PROXY=$(cfgd github_proxy '')
-API_LISTEN=$(cfgd api_listen 127.0.0.1)
+case "$GH_PROXY" in
+	'') ;;
+	https://*) case "$GH_PROXY" in */) ;; *) GH_PROXY="$GH_PROXY/" ;; esac ;;
+	*) printf '[ctl] warning: ignoring github_proxy (must start with https://): %s\n' "$GH_PROXY" >&2; GH_PROXY='' ;;
+esac
+API_LISTEN=$(cfgd api_listen 0.0.0.0)
 API_PORT=$(cfgd api_port 9090)
 API_SECRET=$(cfgd api_secret '')
 DASHBOARD=$(cfgd dashboard 1)
-CLASH_API=$(cfgd clash_api 0)
-CLASH_PORT=$(cfgd clash_port 9091)
-CLASH_SECRET=$(cfgd clash_secret '')
 DASH_URL=$(cfgd dashboard_download_url '')
 
+# Legacy Clash API options (clash_api / clash_port / clash_secret) from earlier releases are gone:
+# this panel only drives the native sing-box services.api. The dead options are ignored (never read,
+# never turned into a config fragment) and removed here so they cannot be re-enabled by hand.
+purge_legacy_clash_keys() {
+	_dirty=0
+	for _k in clash_api clash_port clash_secret; do
+		uci -q get "isongwrt.main.$_k" >/dev/null 2>&1 || continue
+		if uci -q delete "isongwrt.main.$_k" >/dev/null 2>&1; then
+			_dirty=1
+		else
+			printf '[ctl] warning: cannot delete legacy uci option %s\n' "$_k" >&2
+		fi
+	done
+	if [ "$_dirty" = 1 ] && ! uci -q commit isongwrt >/dev/null 2>&1; then
+		printf '[ctl] warning: uci commit failed after removing legacy clash options\n' >&2
+	fi
+	return 0
+}
+
 init_dirs() {
+	# the cache path is predictable and lives in /tmp: refuse to follow a planted symlink
+	[ -L "$CACHE_DIR" ] && die "Refusing to use symlink as cache directory: $CACHE_DIR"
 	mkdir -p "$INSTALL_DIR" "$BACKUP_DIR" "$CONF_DIR" "$CACHE_DIR" "$WORK_DIR" 2>/dev/null
 }
 
@@ -107,6 +163,13 @@ valid_tag() {
 	return 0
 }
 
+# Version argument guard: reject empty / path-traversal / invalid values at entry with a JSON error
+require_version() { # <version without the v prefix>
+	case "${1:-}" in ''|*/*|*..*) die "Missing or invalid version argument" ;; esac
+	valid_tag "v$1" || die "Invalid version: $1"
+	return 0
+}
+
 # ---------- GitHub 版本解析（无 jq，awk 状态机解析 pretty-printed JSON） ----------
 # 版本来源：优先 releases.atom（约 20KB，github.com CDN），失败退回 REST API
 # 解析并校验 atom 文件里的 tag（entry 的 <title> 无 v 前缀，故用 <id> 里的权威 tag）
@@ -128,11 +191,12 @@ fetch_releases_atom() { # [force]：force 跳过 TTL 检查，但失败时保留
 	_now=$(date +%s); _age=999999
 	[ -f "$ATOM_CACHE" ] && _age=$(( _now - $(date -r "$ATOM_CACHE" +%s 2>/dev/null || echo 0) ))
 	if [ "$_force" = "force" ] || [ "$_age" -gt 600 ]; then
-		if dl_get "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" "$ATOM_CACHE.tmp" 20 2>/dev/null; then
-			mv "$ATOM_CACHE.tmp" "$ATOM_CACHE"
+		_at=$(tmp_near "$ATOM_CACHE") || return 1
+		if dl_get "${GH_PROXY}https://github.com/$GH_REPO/releases.atom" "$_at" 20 2>/dev/null && [ -s "$_at" ]; then
+			mv -f "$_at" "$ATOM_CACHE" 2>/dev/null || rm -f "$_at"
 			FETCH_STALE=0
 		else
-			rm -f "$ATOM_CACHE.tmp"
+			rm -f "$_at"
 			FETCH_STALE=1                      # 标记：结果来自旧缓存
 			releases_from_atom "$ATOM_CACHE" || return 1
 			return 0
@@ -141,26 +205,49 @@ fetch_releases_atom() { # [force]：force 跳过 TTL 检查，但失败时保留
 	releases_from_atom "$ATOM_CACHE"
 }
 
-fetch_releases() { # [force]
+# REST fallback (used when the atom feed is unavailable, or when a channel has no entry in it).
+# 100 entries per page covers far more releases than the ~10 entries of the atom feed.
+fetch_releases_rest() {
 	init_dirs
-	if fetch_releases_atom "${1:-}"; then rm -f "$CACHE_DIR/releases.json"; return 0; fi
 	_f="$CACHE_DIR/releases.json"
-	_now=$(date +%s)
-	_age=999999
+	_now=$(date +%s); _age=999999
 	[ -f "$_f" ] && _age=$(( _now - $(date -r "$_f" +%s 2>/dev/null || echo 0) ))
 	if [ "$_age" -gt 600 ]; then
-		dl_get "${GH_PROXY}${GH_API}?per_page=15" "$_f.tmp" 25 2>/dev/null || { rm -f "$_f.tmp"; [ -f "$_f" ] || return 1; }
-		[ -f "$_f.tmp" ] && mv "$_f.tmp" "$_f"
+		_rt=$(tmp_near "$_f") || return 1
+		if dl_get "${GH_PROXY}${GH_API}?per_page=100" "$_rt" 25 2>/dev/null && [ -s "$_rt" ]; then
+			mv -f "$_rt" "$_f" 2>/dev/null || rm -f "$_rt"
+		else
+			rm -f "$_rt"
+			[ -f "$_f" ] || return 1
+		fi
 	fi
 	[ -f "$_f" ] || return 1
 	# 完整性粗检：截断的响应（未以 ] 结束）直接丢弃
 	tail -c 200 "$_f" | grep -q '\]' || { rm -f "$_f"; return 1; }
-	awk '
-		/"tag_name":/ { gsub(/[",]/,"",$2); tag=$2 }
-		/"prerelease":/ { gsub(/,/,"",$2); if (tag!="") { print tag, $2; tag="" } }
-	' "$_f" | while read -r _tag _pre; do
+	# No jq: flatten the JSON and scan it field by field (handles pretty-printed and compact responses)
+	tr -d '\n' < "$_f" | awk '
+		{
+			s = $0
+			while (match(s, /"tag_name": *"[^"]*"/)) {
+				t = substr(s, RSTART, RLENGTH)
+				sub(/^"tag_name": *"/, "", t); sub(/"$/, "", t)
+				s = substr(s, RSTART + RLENGTH)
+				p = "false"
+				if (match(s, /"prerelease": *(true|false)/)) {
+					p = substr(s, RSTART, RLENGTH); sub(/^"prerelease": */, "", p)
+				}
+				print t, p
+			}
+		}
+	' | while read -r _tag _pre; do
 		valid_tag "$_tag" && echo "$_tag $_pre"
 	done
+}
+
+fetch_releases() { # [force]
+	init_dirs
+	fetch_releases_atom "${1:-}" && return 0
+	fetch_releases_rest
 }
 
 channel_match() { # <tag> <channel>
@@ -181,7 +268,10 @@ _pick_channel() { # <channel>  从 stdin 的 tag 列表里取首个匹配
 }
 
 channel_latest() { # <channel>（联网）
-	fetch_releases | _pick_channel "$1"
+	_t=$(fetch_releases | _pick_channel "$1")
+	# The atom feed only lists ~10 recent releases: a quiet channel (alpha/beta/rc) can be missing there,
+	[ -n "$_t" ] || _t=$(fetch_releases_rest | _pick_channel "$1")
+	printf '%s\n' "$_t"
 }
 
 channel_latest_cached() { # <channel>（只读持久缓存，不联网）
@@ -197,9 +287,49 @@ channel_list() { # <channel> [limit]
 }
 
 # ---------- 内核安装 / 回滚 ----------
+# Replace $CORE_PATH atomically: write a sibling temp file, then mv, so procd never execs a partial binary
+install_binary() { # <src-binary>
+	no_symlink "$CORE_PATH.tmp"
+	rm -f "$CORE_PATH.tmp"
+	cp "$1" "$CORE_PATH.tmp" || { rm -f "$CORE_PATH.tmp"; return 1; }
+	chmod 0755 "$CORE_PATH.tmp" 2>/dev/null
+	mv -f "$CORE_PATH.tmp" "$CORE_PATH" || { rm -f "$CORE_PATH.tmp"; return 1; }
+	return 0
+}
+
+# Upstream integrity: the GitHub API reports a sha256 digest per asset. Prints the bare hex digest,
+# and returns 1 when it cannot be obtained: the caller must then refuse to install.
+release_asset_sha256() { # <tag> <asset-name>
+	_tag="$1"; _want="$2"
+	_m=$(tmp_near "$CACHE_DIR/api-asset") || return 1
+	if ! dl_get "${GH_PROXY}https://api.github.com/repos/$GH_REPO/releases/tags/$_tag" "$_m" 25 2>/dev/null; then
+		rm -f "$_m"; return 1
+	fi
+	# No jq: flatten the JSON, one asset per line (a line ends at its browser_download_url), then take
+	# the digest that precedes that URL on the same line
+	_d=$(tr -d '\n' < "$_m" | awk '{ gsub(/"browser_download_url": *"[^"]*"/, "&\n"); print }' | awk -v want="$_want" '
+		{
+			line = $0; d = ""; tmp = line
+			while (match(tmp, /"digest": *"sha256:[0-9a-f]+"/)) { d = substr(tmp, RSTART, RLENGTH); tmp = substr(tmp, RSTART + RLENGTH) }
+			u = ""; tmp = line
+			while (match(tmp, /"browser_download_url": *"[^"]*"/)) { u = substr(tmp, RSTART, RLENGTH); tmp = substr(tmp, RSTART + RLENGTH) }
+			if (d != "" && index(u, "/" want "\"") > 0) { sub(/^"digest": *"sha256:/, "", d); sub(/"$/, "", d); print d; exit }
+		}
+	' | head -1)
+	rm -f "$_m"
+	[ -n "${_d:-}" ] || return 1
+	case "$_d" in *[!0-9a-f]*) return 1 ;; esac
+	printf '%s' "$_d"
+}
+
 do_install() { # <channel> [pinned_tag]
 	_ch="$1"; _pin="${2:-}"
-	if [ -n "$_pin" ]; then _tag="$_pin"; else _tag=$(channel_latest "$_ch"); fi
+	if [ -n "$_pin" ]; then
+		valid_tag "$_pin" || die "Invalid version tag: $_pin"
+		_tag="$_pin"
+	else
+		_tag=$(channel_latest "$_ch")
+	fi
 	[ -n "${_tag:-}" ] || die "无法解析渠道 [$_ch] 的版本（网络或加速前缀问题）"
 	_arch=$(detect_arch)
 	[ -n "$_arch" ] || die "不支持的架构：$(uname -m)"
@@ -207,53 +337,80 @@ do_install() { # <channel> [pinned_tag]
 	_asset="sing-box-${_ver}-linux-${_arch}.tar.gz"
 	_url="${GH_PROXY}https://github.com/$GH_REPO/releases/download/${_tag}/${_asset}"
 	init_dirs
+	purge_legacy_clash_keys
 	_dl="$CACHE_DIR/$_asset"
+	no_symlink "$_dl"
 	printf '[1/4] 版本 %s，架构 %s\n' "$_tag" "$_arch" >&2
 	printf '[2/4] 下载 %s\n' "$_asset" >&2
 	# 断点续传 + 长超时（慢链路可用）；进度与错误走 stderr，stdout 只留最终 JSON
 	if ! dl_resume "$_url" "$_dl" 2>>"$CACHE_DIR/dl.err"; then
 		die "下载失败：$_asset（$(tail -1 "$CACHE_DIR/dl.err" 2>/dev/null | tr -d '"')）"
 	fi
+	# Integrity: compare with the upstream per-asset sha256; on mismatch drop the download and never install
+	_up=$(release_asset_sha256 "$_tag" "$_asset") || {
+		rm -f "$_dl"
+		die "Cannot verify the download: no upstream sha256 for $_asset from the GitHub API (retry later or set a working proxy prefix)"
+	}
+	_sha=$(sha256sum "$_dl" 2>/dev/null | awk '{print $1}')
+	if [ -z "${_sha:-}" ] || [ "$_sha" != "$_up" ]; then
+		rm -f "$_dl"
+		die "Download integrity check failed for $_asset (local ${_sha:-unknown} != upstream ${_up})"
+	fi
 	printf '[3/4] 解压与校验\n' >&2
-	mkdir -p "$CACHE_DIR/x" && rm -rf "$CACHE_DIR/x"/*
-	tar -xzf "$_dl" -C "$CACHE_DIR/x" || die "解压失败：$_asset"
-	_bin=$(find "$CACHE_DIR/x" -type f -name sing-box | head -1)
+	_xdir="$CACHE_DIR/x"
+	no_symlink "$_xdir"
+	rm -rf "$_xdir"
+	mkdir -p "$_xdir" || die "无法创建解压目录：$_xdir"
+	tar -xzf "$_dl" -C "$_xdir" || die "解压失败：$_asset"
+	_bin=$(find "$_xdir" -type f -name sing-box | head -1)
 	[ -n "$_bin" ] || die "压缩包内未找到 sing-box 可执行文件"
 	chmod 0755 "$_bin" 2>/dev/null
-	"$_bin" version >/dev/null 2>&1 || die "二进制无法运行（架构不匹配？）"
-	# 停机 → 备份旧内核 → 安装
+	# Version check: the downloaded core must actually report the target version
+	_vout=$("$_bin" version 2>&1) || die "二进制无法运行（架构不匹配？）"
+	_vget=$(printf '%s\n' "$_vout" | sed -n 's/.*[Vv]ersion[^0-9]*\([0-9][0-9A-Za-z.+-]*\).*/\1/p' | head -1)
+	[ "$_vget" = "$_ver" ] || die "Downloaded core version mismatch: expected $_ver, got ${_vget:-unknown}"
+	# stop service -> record the new version -> atomic replace; any failure restores the old kernel and service
 	_was_running=0
 	pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && _was_running=1
 	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt stop >/dev/null 2>&1
+	_restart() { [ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1; return 0; }
+	_fail() { _restart; die "$1"; }
 	_old=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
-	[ -n "$_old" ] && printf '%s' "$_old" > "$STATE_DIR/previous"
-	cp "$_bin" "$INSTALL_DIR/sing-box-${_ver}" && chmod 0755 "$INSTALL_DIR/sing-box-${_ver}"
-	cp "$_bin" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
+	cp "$_bin" "$INSTALL_DIR/sing-box-${_ver}" 2>/dev/null || _fail "Failed to store the version binary: $INSTALL_DIR/sing-box-${_ver}"
+	chmod 0755 "$INSTALL_DIR/sing-box-${_ver}" 2>/dev/null
+	install_binary "$_bin" || _fail "Failed to replace the current core; the old kernel was kept and the service restored"
 	printf '%s' "$_ver" > "$ACTIVE_FILE"
-	_sha=$(sha256sum "$INSTALL_DIR/sing-box-${_ver}" 2>/dev/null | awk '{print $1}')
-	printf '{"version":"%s","sha256":"%s","installed_at":"%s"}\n' "$_ver" "${_sha:-unknown}" "$(date -Is)" \
-		> "$INSTALL_DIR/sing-box-${_ver}.meta"
+	[ -n "$_old" ] && printf '%s' "$_old" > "$STATE_DIR/previous"
+	# .meta records both the upstream digest and the locally computed one (identical after a successful check)
+	printf '{"version":"%s","sha256":"%s","upstream_sha256":"%s","local_sha256":"%s","verified":true,"installed_at":"%s"}\n' \
+		"$_ver" "$_up" "$_up" "$_sha" "$(date -Is)" > "$INSTALL_DIR/sing-box-${_ver}.meta"
 	printf '[4/4] 安装完成并激活 %s\n' "$_ver" >&2
 	rm -f "$_dl"
-	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
-	ok ",\"version\":\"$_ver\",\"arch\":\"$_arch\",\"restarted\":$([ "$_was_running" = 1 ] && echo true || echo false)"
+	_restart
+	ok ",\"version\":\"$_ver\",\"arch\":\"$_arch\",\"sha256\":\"$_up\",\"restarted\":$([ "$_was_running" = 1 ] && echo true || echo false)"
 }
 
 do_activate() { # <version>
 	_v="$1"
+	require_version "$_v"
 	[ -x "$INSTALL_DIR/sing-box-${_v}" ] || die "版本未安装：$_v"
 	_cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
 	[ "$_cur" = "$_v" ] && { ok ",\"version\":\"$_v\",\"unchanged\":true"; exit 0; }
 	_was_running=0
 	pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && _was_running=1
 	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt stop >/dev/null 2>&1
+	install_binary "$INSTALL_DIR/sing-box-${_v}" || {
+		[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
+		die "Failed to switch the core; the previous kernel is untouched"
+	}
 	[ -n "$_cur" ] && printf '%s' "$_cur" > "$STATE_DIR/previous"
-	cp "$INSTALL_DIR/sing-box-${_v}" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
 	printf '%s' "$_v" > "$ACTIVE_FILE"
 	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
 	ok ",\"version\":\"$_v\""
 }
 
+# Kernel-only rollback: swap $CORE_PATH back to the previous binary and exchange active/previous.
+# Note: config fragments under $CONF_DIR are NOT restored here; use config-restore for that.
 do_rollback() {
 	_prev=$(cat "$STATE_DIR/previous" 2>/dev/null || echo "")
 	[ -n "$_prev" ] || die "没有可回滚的版本记录"
@@ -262,7 +419,10 @@ do_rollback() {
 	_was_running=0
 	pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && _was_running=1
 	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt stop >/dev/null 2>&1
-	cp "$INSTALL_DIR/sing-box-${_prev}" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
+	install_binary "$INSTALL_DIR/sing-box-${_prev}" || {
+		[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
+		die "Failed to roll back the core; the current kernel is untouched"
+	}
 	printf '%s' "$_prev" > "$ACTIVE_FILE"
 	[ -n "$_cur" ] && printf '%s' "$_cur" > "$STATE_DIR/previous"
 	[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
@@ -271,6 +431,7 @@ do_rollback() {
 
 do_remove() { # <version> [force]
 	_v="$1"; _force="${2:-}"
+	require_version "$_v"
 	[ -x "$INSTALL_DIR/sing-box-${_v}" ] || die "版本未安装：$_v"
 	_cur=$(cat "$ACTIVE_FILE" 2>/dev/null || echo "")
 
@@ -285,10 +446,12 @@ do_remove() { # <version> [force]
 		_prev=$(cat "$STATE_DIR/previous" 2>/dev/null || echo "")
 		[ "$_v" = "$_prev" ] && rm -f "$STATE_DIR/previous"
 		# 若还有其它版本，自动激活最新的一版
-		_next=$(ls -1 "$INSTALL_DIR"/sing-box-* 2>/dev/null | grep -v '\.meta$' | sort -V | tail -1)
+		# busybox needs HAVE_STRVERSCMP for sort -V: fall back to newest mtime so a missing -V is not misread as "no kernel left"
+		_next=$(ls -1 "$INSTALL_DIR"/sing-box-* 2>/dev/null | grep -v '\.meta$' | sort -V 2>/dev/null | tail -1)
+		[ -n "$_next" ] || _next=$(ls -1t "$INSTALL_DIR"/sing-box-* 2>/dev/null | grep -v '\.meta$' | head -1)
 		if [ -n "$_next" ]; then
 			_nv=${_next##*/sing-box-}
-			cp "$_next" "$CORE_PATH" && chmod 0755 "$CORE_PATH"
+			install_binary "$_next" || { [ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1; die "Failed to auto-activate $_nv"; }
 			printf '%s' "$_nv" > "$ACTIVE_FILE"
 			[ "$_was_running" = 1 ] && /etc/init.d/isongwrt start >/dev/null 2>&1
 			ok ",\"removed\":\"$_v\",\"activated\":\"$_nv\""
@@ -313,13 +476,22 @@ INSTALL_LOCK="$CACHE_DIR/install.lock"
 do_install_bg() { # <channel> [tag]
 	_ch="$1"; _pin="${2:-}"
 	init_dirs
+	no_symlink "$INSTALL_LOCK"
+	no_symlink "$INSTALL_LOG"
 	if [ -f "$INSTALL_LOCK" ] && kill -0 "$(cat "$INSTALL_LOCK" 2>/dev/null)" 2>/dev/null; then
 		die "已有安装任务正在进行（可查看进度）"
 	fi
 	rm -f "$INSTALL_LOCK"
-	: > "$INSTALL_LOG"
+	: > "$INSTALL_LOG" || die "Cannot write the install log: $INSTALL_LOG"
+	# Atomic lock claim: under set -C (noclobber) a failing redirect means a concurrent task got the lock.
+	# Write this shell's PID as a placeholder (it is alive right now); the worker takes over and its trap cleans up.
+	if ! ( set -C; printf '%s\n' "$$" > "$INSTALL_LOCK" ) 2>/dev/null; then
+		die "已有安装任务正在进行（可查看进度）"
+	fi
 	# busybox 无 nohup：子 shell 后台 + 重定向即可（无控制终端，父进程退出不影响）
-	( /usr/lib/isongwrt/ctl install "$_ch" "$_pin" >> "$INSTALL_LOG" 2>&1 & echo $! > "$INSTALL_LOCK" )
+	( trap 'rm -f "$INSTALL_LOCK"' EXIT INT TERM; /usr/lib/isongwrt/ctl install "$_ch" "$_pin" ) >> "$INSTALL_LOG" 2>&1 &
+	_worker=$!
+	printf '%s\n' "$_worker" > "$INSTALL_LOCK"
 	sleep 1
 	ok ",\"pid\":$(cat "$INSTALL_LOCK" 2>/dev/null || echo 0)"
 }
@@ -343,91 +515,119 @@ do_install_status() {
 	printf '"}\n'
 }
 
-# 为配置里的 remote rule_set 注入 download_detour（解决国内直连 GitHub 下载失败导致启动失败）
+# Route remote rule_set downloads through a proxy outbound (a failing download keeps the core from starting).
+# Only the modern form is written: declare an http_client with a detour and reference it from rule_set.http_client;
+# the legacy download_detour is deprecated and FATAL on sing-box >= 1.14, so it is never written.
 # 用法：conf-fix-remote <name> [outbound-tag]
 do_conf_fix_remote() {
-	_name="$1"; _tag="${2:-}"
-	case "$_name" in */*|*..*) die "非法文件名";; esac
+	_name="${1:-}"; _tag="${2:-}"
+	case "$_name" in ''|*/*|*..*) die "Invalid file name" ;; esac
 	_f="$CONF_DIR/$_name.json"
 	[ -f "$_f" ] || die "配置文件不存在：$_name.json"
 
-	_n_remote=$(grep -c '"type": "remote"' "$_f" 2>/dev/null || echo 0)
-	[ "$_n_remote" -gt 0 ] || die "该配置没有 remote 类型的 rule_set，无需修复"
-	_n_detour=$(grep -c 'download_detour' "$_f" 2>/dev/null || echo 0)
-	[ "$_n_detour" -ge "$_n_remote" ] && die "已全部包含 download_detour（$_n_detour/$_n_remote），无需修复"
-
-	# 新版写法：http_clients 里定义带 detour 的客户端，rule_set 用 http_client 引用；
-	# 若配置里已有 http_clients（不便自动改写数组），退回旧的 download_detour（可用但会告警）
-	_modern=1
-	grep -q '"http_clients"' "$_f" && _modern=0
+	_n_remote=$(grep -cE '"type"[[:space:]]*:[[:space:]]*"remote"' "$_f" 2>/dev/null || :)
+	[ "${_n_remote:-0}" -gt 0 ] || die "该配置没有 remote 类型的 rule_set，无需修复"
+	_n_have=$(grep -cE '"(http_client|download_detour)"[[:space:]]*:' "$_f" 2>/dev/null || :)
+	[ "${_n_have:-0}" -ge "$_n_remote" ] && die "All remote rule_sets already specify a download client ($_n_have/$_n_remote); nothing to fix"
 
 	# 推断代理出站：参数 → route.final（若为代理）→ 第一个非直连出站
 	if [ -z "$_tag" ]; then
-		_tag=$(grep -o '"final": "[^"]*"' "$_f" | tail -1 | sed 's/.*: "//; s/"$//')
+		_tag=$(grep -oE '"final"[[:space:]]*:[[:space:]]*"[^"]*"' "$_f" | tail -1 | sed 's/.*:[[:space:]]*"//; s/"$//')
 		case "$_tag" in ""|direct|DIRECT) _tag="" ;; esac
 	fi
 	if [ -z "$_tag" ]; then
-		_tag=$(grep -o '"tag": "[^"]*"' "$_f" | sed 's/.*: "//; s/"$//' | grep -viE '^(direct|DIRECT|block|dns-|.*-in|mixed-in)$' | head -1)
+		_tag=$(grep -oE '"tag"[[:space:]]*:[[:space:]]*"[^"]*"' "$_f" | sed 's/.*:[[:space:]]*"//; s/"$//' | grep -viE '^(direct|DIRECT|block|dns-|.*-in|mixed-in)$' | head -1)
 	fi
 	[ -n "$_tag" ] || die "未找到可用作下载代理的出站，请指定：conf-fix-remote $_name <出站标签>"
 
 	init_dirs
-	_bak="$BACKUP_DIR/${_name}-detour-$(date +%Y%m%d-%H%M%S).json"
-	mkdir -p "$BACKUP_DIR"; cp "$_f" "$_bak" || die "备份失败"
+	_bak="$BACKUP_DIR/${_name}-detour-$(date +%Y%m%d-%H%M%S)-$$.json"
+	mkdir -p "$BACKUP_DIR"
+	cp "$_f" "$_bak" || die "备份失败"
 
-	# 逐行插入（保持缩进与注释不动）
-	if [ "$_modern" = "1" ]; then
-		# 1) 顶层插入 http_clients 定义（放在 route 之前）
-		awk -v tag="$_tag" '
-			BEGIN { done = 0 }
-			{
-				if (done == 0 && $0 ~ /^  "route"[ ]*:[ ]*\{/) {
-					print "  \"http_clients\": [ { \"tag\": \"isongwrt-download\", \"detour\": \"" tag "\" } ],"
-					done = 1
+	# 1) Make sure an http_client with a detour exists (reuse the tag when it is already there)
+	_client=isongwrt-download
+	if ! grep -qE '"tag"[[:space:]]*:[[:space:]]*"isongwrt-download"' "$_f" 2>/dev/null; then
+		_work=$(tmp_near "$_f") || die "Cannot create a temporary file"
+		if grep -qE '"http_clients"[[:space:]]*:' "$_f" 2>/dev/null; then
+			# http_clients already exists: insert one element into that array (keep the user's layout and order)
+			awk -v entry="{ \"tag\": \"isongwrt-download\", \"detour\": \"$_tag\" }" '
+				BEGIN { done = 0 }
+				{
+					if (done == 0 && $0 ~ /"http_clients"[ \t]*:[ \t]*\[/) {
+						line = $0
+						if (line ~ /\[[ \t]*\][ \t]*,?[ \t]*$/) {
+							sub(/\[[ \t]*\]/, "[ " entry " ]", line); print line; done = 1; next
+						}
+						if (line ~ /\[[ \t]*$/) {
+							print line
+							if ((getline nxt) > 0) {
+								if (nxt ~ /^[ \t]*\][ \t]*,?[ \t]*$/) print "    " entry
+								else print "    " entry ","
+								print nxt
+							}
+							done = 1; next
+						}
+						sub(/\[/, "[ " entry ",", line); print line; done = 1; next
+					}
+					print
 				}
-				print
-			}
-			END {
-				if (done == 0) exit 3
-			}
-		' "$_f" > "$_f.new" || { rm -f "$_f.new"; _modern=0; }
-		[ "$_modern" = "1" ] && mv "$_f.new" "$_f"
-		# 2) 给缺引用字段的 remote rule_set 补 http_client
-		awk -v key='"http_client"' '
-			BEGIN { pending = 0 }
-			{
-				if (pending == 1) {
-					if ($0 ~ /http_client|download_detour/) { print; pending = 0; next }
-					print indent key ": \"isongwrt-download\","
-					pending = 0; print; next
+				END { if (done == 0) exit 3 }
+			' "$_f" > "$_work" || { rm -f "$_work"; die "Failed to write http_clients (no http_clients array found)"; }
+		else
+			# No http_clients yet: insert the top-level definition before the route section
+			awk -v entry="{ \"tag\": \"isongwrt-download\", \"detour\": \"$_tag\" }" '
+				BEGIN { done = 0 }
+				{
+					if (done == 0 && $0 ~ /^[ \t]*"route"[ \t]*:[ \t]*\{/) {
+						print "  \"http_clients\": [ " entry " ],"
+						done = 1
+					}
+					print
 				}
-				print
-				if ($0 ~ /"type": *"remote",/) {
-					match($0, /^[ \t]*/); indent = substr($0, 1, RLENGTH); pending = 1
-				}
-			}
-		' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
-	fi
-	if [ "$_modern" = "0" ]; then
-		# 回退：旧的 download_detour（sing-box 会给出弃用告警，但功能正常）
-		awk -v tag="$_tag" '
-			BEGIN { pending = 0 }
-			{
-				if (pending == 1) {
-					if ($0 ~ /download_detour/) { print; pending = 0; next }
-					print indent "\"download_detour\": \"" tag "\","
-					pending = 0; print; next
-				}
-				print
-				if ($0 ~ /"type": *"remote",/) {
-					match($0, /^[ \t]*/); indent = substr($0, 1, RLENGTH); pending = 1
-				}
-			}
-		' "$_f" > "$_f.new" && mv "$_f.new" "$_f"
+				END { if (done == 0) exit 3 }
+			' "$_f" > "$_work" || { rm -f "$_work"; die "Failed to write http_clients (config must be multi-line and contain a route section)"; }
+		fi
+		replace_file "$_work" "$_f" || { rm -f "$_work"; die "Failed to replace the config file"; }
 	fi
 
+	# 2) Add http_client to every remote rule_set that lacks a download client
+	_work=$(tmp_near "$_f") || die "Cannot create a temporary file"
+	awk -v cl="$_client" -v key="http_client" '
+		BEGIN { pending = 0 }
+		function emit() { print indent "\"" key "\": \"" cl "\"," }
+		{
+			if (pending == 1) {
+				pending = 0
+				if ($0 ~ /^[ \t]*"(http_client|download_detour)"[ \t]*:/) { print; next }
+				emit(); print; next
+			}
+			if ($0 ~ /"type"[ \t]*:[ \t]*"remote"/) {
+				if ($0 ~ /"(http_client|download_detour)"[ \t]*:/) { print; next }
+				# Canonical multi-line form: type alone on its line with a trailing comma -> insert on the next line
+				if ($0 ~ /^[ \t]*"type"[ \t]*:[ \t]*"remote"[ \t]*,[ \t]*$/) {
+					match($0, /^[ \t]*/); indent = substr($0, 1, RLENGTH)
+					print; pending = 1; next
+				}
+				# Other layouts (more fields on the same line / single-line object): insert right after the type field
+				if ($0 ~ /"type"[ \t]*:[ \t]*"remote"[ \t]*,/) {
+					sub(/"type"[ \t]*:[ \t]*"remote"[ \t]*,/, "& \"" key "\": \"" cl "\",")
+					print; next
+				}
+				sub(/"type"[ \t]*:[ \t]*"remote"/, "&, \"" key "\": \"" cl "\"")
+				print; next
+			}
+			print
+		}
+	' "$_f" > "$_work" || { rm -f "$_work"; die "Failed to write rule_set entries"; }
+	replace_file "$_work" "$_f" || { rm -f "$_work"; die "Failed to replace the config file"; }
+
+	# 3) Byte-compare with the backup: fail loudly when nothing changed instead of reporting success
+	if cmp -s "$_bak" "$_f"; then
+		die "Nothing changed: no remote rule_set needed a download client (file left untouched)"
+	fi
 	if _e=$(CONF_CHECK 2>&1); then
-		ok ",\"patched\":\"$_name.json\",\"detour\":\""$_tag"\",\"backup\":\"$(json_esc "$_bak")\""
+		ok ",\"patched\":\"$_name.json\",\"detour\":\"$(json_esc "$_tag")\",\"http_client\":\"$_client\",\"backup\":\"$(json_esc "$_bak")\""
 	else
 		cp "$_bak" "$_f"
 		die "注入后配置校验失败，已回滚：$(printf '%s' "$_e" | tail -2 | tr '\n' ' ')"
@@ -445,47 +645,82 @@ CONF_CHECK() { # 返回 0/1，并输出错误文本
 }
 
 do_config_save() { # <name> [file]  内容来自 file，缺省从 stdin 读取
-	_name="$1"; _src="${2:-}"; init_dirs
-	case "$_name" in */*|*..*) die "非法文件名";; esac
-	_tmp="$CACHE_DIR/upload-$$.json"
+	_name="${1:-}"; _src="${2:-}"; init_dirs
+	case "$_name" in ''|*/*|*..*) die "Invalid file name" ;; esac
+	case "$_name" in *.json) die "Invalid file name (use the bare name, without .json)" ;; esac
+	_tmp=$(mktemp "$CACHE_DIR/upload-XXXXXX" 2>/dev/null) || die "Cannot create a temporary file"
 	if [ -n "$_src" ]; then
-		[ -f "$_src" ] || die "内容文件不存在：$_src"
-		cp "$_src" "$_tmp" || die "读取内容文件失败"
+		[ -f "$_src" ] || { rm -f "$_tmp"; die "内容文件不存在：$_src"; }
+		cp "$_src" "$_tmp" || { rm -f "$_tmp"; die "读取内容文件失败"; }
 	else
-		cat > "$_tmp" || die "读取上传内容失败"
+		cat > "$_tmp" || { rm -f "$_tmp"; die "读取上传内容失败"; }
 	fi
-	[ -s "$_tmp" ] || die "内容为空（请先在上方编辑或选择文件）"
+	[ -s "$_tmp" ] || { rm -f "$_tmp"; die "内容为空（请先在上方编辑或选择文件）"; }
 	_target="$CONF_DIR/${_name}.json"
-	_bak="$BACKUP_DIR/${_name}-$(date +%Y%m%d-%H%M%S).json"
+	# Include the PID in the backup name so two saves within the same second cannot overwrite each other
+	_bak="$BACKUP_DIR/${_name}-$(date +%Y%m%d-%H%M%S)-$$.json"
 	[ -f "$_target" ] && cp "$_target" "$_bak"
-	cp "$_tmp" "$_target"
+	_work=$(tmp_near "$_target") || { rm -f "$_tmp"; die "Cannot create a temporary file"; }
+	cp "$_tmp" "$_work" || { rm -f "$_tmp" "$_work"; die "Failed to write the config"; }
+	replace_file "$_work" "$_target" || { rm -f "$_tmp" "$_work"; die "Failed to replace the config file"; }
+	rm -f "$_tmp"
 	if ! _err=$(CONF_CHECK 2>&1); then
+		# Failed validation: restore the pre-save file (no backup means it did not exist -> drop the new file)
 		[ -f "$_bak" ] && cp "$_bak" "$_target" || rm -f "$_target"
-		rm -f "$_tmp"
 		die "配置校验未通过，已回退：$(printf '%s' "$_err" | tail -3 | tr '\n' ' ')"
 	fi
-	rm -f "$_tmp"
 	ok ",\"file\":\"$(json_esc "$_target")\""
 }
 
+# Only accept backup names written by config-save: <name>-YYYYmmdd-HHMMSS.json (a trailing -PID is allowed).
+# snapshot-* (archive) and *-detour-* (pre-patch snapshot) are not full config backups, so they are refused:
+# restoring one would derive a wrong fragment name (e.g. foo-detour.json) and create a stray fragment.
 do_config_restore() { # <backup-file>
-	_b="$1"
-	case "$_b" in */*|*..*) die "非法文件名";; esac
+	_b="${1:-}"
+	case "$_b" in ''|*/*|*..*) die "Invalid backup file name" ;; esac
+	case "$_b" in
+		snapshot-*) die "This is an archive snapshot, not a config backup; it cannot be restored from the panel" ;;
+		*-detour-*) die "This is a rule-set patch backup, not a config backup; restore it manually" ;;
+	esac
+	case "$_b" in *.json) ;; *) die "Invalid backup file name (expected <name>-YYYYmmdd-HHMMSS.json)" ;; esac
+	_name=$(printf '%s' "$_b" | sed -n 's/^\(.*\)-[0-9]\{8\}-[0-9]\{6\}\(-[0-9]\{1,\}\)\{0,1\}\.json$/\1/p')
+	[ -n "$_name" ] || die "Invalid backup file name (expected <name>-YYYYmmdd-HHMMSS.json)"
+	case "$_name" in */*|*..*|*.json) die "Invalid backup file name" ;; esac
 	[ -f "$BACKUP_DIR/$_b" ] || die "备份不存在：$_b"
-	_name=$(printf '%s' "$_b" | sed 's/-[0-9]\{8\}-[0-9]\{6\}\.json$//')
-	cp "$BACKUP_DIR/$_b" "$CONF_DIR/${_name}.json" || die "恢复失败"
+	init_dirs
+	_target="$CONF_DIR/${_name}.json"
+	# Back up the current file first: a failed validation must always be able to roll back
+	_prev="$BACKUP_DIR/${_name}-$(date +%Y%m%d-%H%M%S)-$$.json"
+	[ -f "$_target" ] && cp "$_target" "$_prev"
+	_work=$(tmp_near "$_target") || die "Cannot create a temporary file"
+	cp "$BACKUP_DIR/$_b" "$_work" || { rm -f "$_work"; die "Restore failed"; }
+	replace_file "$_work" "$_target" || { rm -f "$_work"; die "Restore failed"; }
 	if ! _err=$(CONF_CHECK 2>&1); then
-		die "恢复后的配置校验未通过：$(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
+		if [ -f "$_prev" ]; then cp "$_prev" "$_target"; else rm -f "$_target"; fi
+		die "Restored config failed validation; the previous file was rolled back: $(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
 	fi
 	ok ",\"restored\":\"$_name\""
 }
 
 do_config_get() { # <name>
-	_f="$CONF_DIR/${1:?}.json"
-	[ -f "$_f" ] || die "配置不存在：${1}"
-	printf '{"ok":true,"name":"%s","content":"' "$(json_esc "${1}")"
+	_name="${1:-}"
+	case "$_name" in ''|*/*|*..*) die "Missing or invalid config name" ;; esac
+	_f="$CONF_DIR/${_name}.json"
+	[ -f "$_f" ] || die "配置不存在：$_name"
+	printf '{"ok":true,"name":"%s","content":"' "$(json_esc "$_name")"
 	json_ml < "$_f"
 	printf '"}\n'
+}
+
+# A restorable backup is a <name>-YYYYmmdd-HHMMSS[-PID].json written by config-save/config-restore;
+# everything else (archives, *-detour-* snapshots) is listed under backups_other and not offered for restore.
+is_restorable_backup() { # <basename>
+	case "$1" in
+		snapshot-*|*-detour-*) return 1 ;;
+		*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].json) return 0 ;;
+		*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-[0-9]*.json) return 0 ;;
+	esac
+	return 1
 }
 
 do_config_list() {
@@ -496,26 +731,36 @@ do_config_list() {
 		[ -f "$f" ] || continue
 		[ "$_first" = 1 ] || printf ','
 		_first=0
-		printf '{"name":"%s","size":%s}' "$(basename "$f" .json)" "$(wc -c < "$f" | tr -d ' ')"
+		printf '{"name":"%s","size":%s}' "$(json_esc "$(basename "$f" .json)")" "$(wc -c < "$f" | tr -d ' ')"
 	done
 	printf '],"backups":['
 	_first=1
 	for f in "$BACKUP_DIR"/*.json; do
 		[ -f "$f" ] || continue
+		_bn=$(basename "$f")
+		is_restorable_backup "$_bn" || continue
 		[ "$_first" = 1 ] || printf ','
 		_first=0
-		printf '"%s"' "$(basename "$f")"
+		printf '"%s"' "$(json_esc "$_bn")"
+	done
+	printf '],"backups_other":['
+	_first=1
+	for f in "$BACKUP_DIR"/*.json; do
+		[ -f "$f" ] || continue
+		_bn=$(basename "$f")
+		is_restorable_backup "$_bn" && continue
+		[ "$_first" = 1 ] || printf ','
+		_first=0
+		printf '"%s"' "$(json_esc "$_bn")"
 	done
 	printf ']}\n'
 }
 
 do_api_secret_new() {
 	_new=$(head -c 32 /dev/urandom | md5sum | cut -c1-24)
-	if uci -q set isongwrt.main.api_secret="$_new" && uci -q commit isongwrt; then
-		ok ",\"secret\":\"$_new\""
-	else
-		die "写入 UCI 失败"
-	fi
+	uci -q set isongwrt.main.api_secret="$_new" >/dev/null 2>&1 || die "写入 UCI 失败"
+	uci -q commit isongwrt >/dev/null 2>&1 || die "Failed to commit UCI (api_secret was not persisted)"
+	ok ",\"secret\":\"$_new\""
 }
 
 # ---------- API / 面板托管（独立分片文件，避免改动用户配置） ----------
@@ -523,63 +768,65 @@ do_api_sync() {
 	init_dirs
 	_f="$CONF_DIR/90-isongwrt-api.json"
 
+	# Drop legacy Clash options here (warn only, never affects the api-sync result)
+	purge_legacy_clash_keys
+
 	# ---------- 检测「上传配置」里已定义的方案（面板只补缺，绝不覆盖） ----------
-	_u_api=false; _u_clash=false; _u_http_tag=""
+	_u_api=false; _u_http_tag=""
 	for _cf in "$CONF_DIR"/*.json; do
 		case "$_cf" in *90-isongwrt-api.json) continue ;; esac
 		[ -f "$_cf" ] || continue
-		grep -q '"type": *"api"' "$_cf" 2>/dev/null && _u_api=true
-		grep -q '"clash_api"' "$_cf" 2>/dev/null && _u_clash=true
+		grep -qE '"type"[[:space:]]*:[[:space:]]*"api"' "$_cf" 2>/dev/null && _u_api=true
 		if [ -z "$_u_http_tag" ]; then
-			_u_http_tag=$(sed -n 's/.*"default_http_client": *"\([^"]*\)".*/\1/p' "$_cf" 2>/dev/null | head -1)
-			[ -n "$_u_http_tag" ] || _u_http_tag=$(sed -n '/"http_clients"/,/]/p' "$_cf" 2>/dev/null | sed -n 's/.*"tag": *"\([^"]*\)".*/\1/p' | head -1)
+			_u_http_tag=$(sed -n 's/.*"default_http_client"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_cf" 2>/dev/null | head -1)
+			[ -n "$_u_http_tag" ] || _u_http_tag=$(sed -n '/"http_clients"/,/]/p' "$_cf" 2>/dev/null | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 		fi
 	done
 
-	_clash_src=none; [ "$_u_clash" = true ] && _clash_src=config
 	_need_api=$DASHBOARD
-	_need_clash=false
-	[ "$CLASH_API" = 1 ] && [ "$_u_clash" = false ] && _need_clash=true
-	_clash_src_panel=false; [ "$_need_clash" = true ] && _clash_src_panel=true
 
 	# 配置里已有 API 服务 → 面板完全不注入
 	if [ "$_u_api" = true ]; then
 		[ -f "$_f" ] && rm -f "$_f"
-		_write_source config "$_clash_src"
-		ok ",\"api_file\":null,\"api_source\":\"config\",\"clash_source\":\"$_clash_src\",\"note\":\"配置已自带 API 服务，面板未注入任何分片\""
+		_write_source config
+		ok ",\"api_file\":null,\"api_source\":\"config\",\"note\":\"配置已自带 API 服务，面板未注入任何分片\""
 		return 0
 	fi
 
-	# 面板不需要注入任何东西 → 清掉历史分片
-	if [ "$_need_api" != 1 ] && [ "$_need_clash" != true ]; then
+	# Nothing to inject -> remove a previously generated fragment
+	if [ "$_need_api" != 1 ]; then
 		[ -f "$_f" ] && rm -f "$_f"
-		_write_source none "$_clash_src"
-		ok ",\"api_file\":null,\"api_source\":\"none\",\"clash_source\":\"$_clash_src\""
+		_write_source none
+		ok ",\"api_file\":null,\"api_source\":\"none\""
 		return 0
 	fi
 
 	# 访问密钥：仅面板自己写 api 服务时才需要（默认自动生成并写回 UCI）
-	if [ "$_need_api" = 1 ] && [ -z "$API_SECRET" ]; then
+	if [ -z "$API_SECRET" ]; then
 		API_SECRET=$(head -c 32 /dev/urandom | md5sum | cut -c1-24)
-		uci -q set isongwrt.main.api_secret="$API_SECRET" >/dev/null 2>&1 && uci -q commit isongwrt >/dev/null 2>&1
+		if ! uci -q set isongwrt.main.api_secret="$API_SECRET" >/dev/null 2>&1; then
+			printf '[api-sync] warning: cannot persist api_secret to uci\n' >&2
+		elif ! uci -q commit isongwrt >/dev/null 2>&1; then
+			printf '[api-sync] warning: uci commit failed, api_secret is not persisted (a new one is generated on the next sync)\n' >&2
+		fi
 		printf '[api-sync] 已自动生成访问密钥\n' >&2
 	fi
-	[ -n "$API_LISTEN" ] || API_LISTEN=0.0.0.0
 
 	# http client：配置里已有就复用其 tag（不重复定义 http_clients，避免与用户配置打架）
 	_http_line=""; _dash_client="isongwrt-dashboard"
-	if [ "$_need_api" = 1 ]; then
-		if [ -n "$_u_http_tag" ]; then
-			_dash_client="$_u_http_tag"
-		else
-			_http_line='  "http_clients": [ { "tag": "isongwrt-dashboard" } ],'
-		fi
+	if [ -n "$_u_http_tag" ]; then
+		_dash_client="$_u_http_tag"
+	else
+		_http_line='  "http_clients": [ { "tag": "isongwrt-dashboard" } ],'
 	fi
 
-	{
-		printf '{\n'
-		[ -n "$_http_line" ] && printf '%s\n' "$_http_line"
-		if [ "$_need_api" = 1 ]; then
+	# The fragment carries the API secret: write a private temp file and replace atomically (umask 077 + chmod 600)
+	_frag=$(mktemp "$CONF_DIR/.isongwrt-api-XXXXXX" 2>/dev/null) || die "Cannot create a temporary API fragment file"
+	(
+		umask 077
+		{
+			printf '{\n'
+			[ -n "$_http_line" ] && printf '%s\n' "$_http_line"
 			printf '  "services": [\n    {\n      "type": "api",\n      "tag": "isongwrt-api",\n'
 			printf '      "listen": "%s",\n      "listen_port": %s,\n' "$API_LISTEN" "$API_PORT"
 			[ -n "$API_SECRET" ] && printf '      "secret": "%s",\n' "$(json_esc "$API_SECRET")"
@@ -589,39 +836,51 @@ do_api_sync() {
 			else
 				printf '      "dashboard": { "enabled": true, "update_interval": "1d", "http_client": "%s" }\n' "$_dash_client"
 			fi
-			if [ "$_need_clash" = true ]; then printf '    }\n  ],\n'; else printf '    }\n  ]\n'; fi
-		fi
-		if [ "$_need_clash" = true ]; then
-			printf '  "experimental": {\n    "clash_api": {\n      "external_controller": "%s:%s"' "$API_LISTEN" "$CLASH_PORT"
-			[ -n "$CLASH_SECRET" ] && printf ',\n      "secret": "%s"' "$(json_esc "$CLASH_SECRET")"
-			printf '\n    }\n  }\n'
-		fi
-		printf '}\n'
-	} > "$_f"
+			printf '    }\n  ]\n}\n'
+		} > "$_frag"
+	) || { rm -f "$_frag"; die "Failed to write the API fragment"; }
+
+	# Validate after the swap (sing-box only reads *.json, so the temp file is never parsed); restore on failure
+	_fbak=""
+	if [ -f "$_f" ]; then
+		_fbak=$(mktemp "$CONF_DIR/.isongwrt-api-bak-XXXXXX" 2>/dev/null) || _fbak=""
+		if [ -n "$_fbak" ] && ! cp "$_f" "$_fbak"; then rm -f "$_fbak"; _fbak=""; fi
+	fi
+	replace_private "$_frag" "$_f" || { rm -f "$_frag" "$_fbak"; die "Failed to replace the API fragment"; }
 
 	if ! _err=$(CONF_CHECK 2>&1); then
-		rm -f "$_f"
-		_write_source none none
+		if [ -n "$_fbak" ] && [ -f "$_fbak" ]; then
+			replace_private "$_fbak" "$_f" || rm -f "$_f"
+		else
+			rm -f "$_f"
+		fi
+		_write_source none
 		die "生成 API 分片失败（与配置冲突？）：$(printf '%s' "$_err" | tail -2 | tr '\n' ' ')"
 	fi
+	rm -f "$_fbak"
 
-	_panel_api=none; [ "$_need_api" = 1 ] && _panel_api=panel
-	[ "$_need_clash" = true ] && _clash_src=panel
-	_write_source "$_panel_api" "$_clash_src"
+	_write_source panel
 	_busy=""
-	if [ "$_need_api" = 1 ] && netstat -tln 2>/dev/null | grep -q ":$API_PORT "; then
+	if netstat -tln 2>/dev/null | grep -q ":$API_PORT "; then
 		pgrep -f "$CORE_PATH run" >/dev/null 2>&1 || _busy="（注意：端口 $API_PORT 已被其它程序占用，服务可能启动失败）"
 	fi
-	ok ",\"api_file\":\"$(json_esc "$_f")\",\"api_source\":\"$_panel_api\",\"clash_source\":\"$_clash_src\",\"warning\":\"$_busy\""
+	ok ",\"api_file\":\"$(json_esc "$_f")\",\"api_source\":\"panel\",\"warning\":\"$_busy\""
 }
 
-# 记录「API/clash 由谁提供」，供状态页展示
+# Record who provides the API (config = from the uploaded config, panel = injected, none), for the status page
 _write_source() {
-	printf 'api_source=%s\nclash_source=%s\n' "$1" "$2" > "$STATE_DIR/api-source" 2>/dev/null
+	_st="$STATE_DIR/api-source"
+	_ws=$(mktemp "$_st.XXXXXX" 2>/dev/null) || return 0
+	( umask 077; printf 'api_source=%s\n' "$1" > "$_ws" ) 2>/dev/null
+	chmod 600 "$_ws" 2>/dev/null
+	mv -f "$_ws" "$_st" 2>/dev/null || rm -f "$_ws"
+	return 0
 }
 
 # ---------- 状态 / 日志 / 服务 ----------
 do_status() {
+	# Also drop legacy Clash options (UCI is only written when such an option exists)
+	purge_legacy_clash_keys
 	_running=false; _pid=""
 	_p=$(pgrep -f "$CORE_PATH run" 2>/dev/null | head -1)
 	[ -n "$_p" ] && { _running=true; _pid="$_p"; }
@@ -643,37 +902,35 @@ do_status() {
 		[ "$_running" = false ] && _port_busy=true
 	fi
 
-	# API/clash 由谁提供（api-sync 写入；config = 上传配置自带，panel = 面板注入）
-	_api_src=none; _clash_src=none
+	# Who provides the API (written by api-sync; config = uploaded config, panel = injected by the panel)
+	_api_src=none
 	if [ -f "$STATE_DIR/api-source" ]; then
 		_api_src=$(sed -n 's/^api_source=//p' "$STATE_DIR/api-source" | head -1)
-		_clash_src=$(sed -n 's/^clash_source=//p' "$STATE_DIR/api-source" | head -1)
 		[ -n "$_api_src" ] || _api_src=none
-		[ -n "$_clash_src" ] || _clash_src=none
 	fi
 
-	# 配置内冲突：用户配置里的 clash_api/入站 若与面板 API 端口相同，内核会启动成功后立刻 FATAL 退出
+	# Port conflict: a service/inbound in the user config on the same port makes the core exit FATAL right after start
 	_api_conflict=false
 	for _cf in "$CONF_DIR"/*.json; do
 		[ -f "$_cf" ] || continue
 		case "$_cf" in *90-isongwrt-api.json) continue ;; esac
-		if grep -qE '\"external_controller\": *\"[^\"]*:'"$API_PORT"'\"' "$_cf" 2>/dev/null; then
+		if grep -qE '"external_controller"[[:space:]]*:[[:space:]]*"[^"]*:'"$API_PORT"'("|/)' "$_cf" 2>/dev/null; then
 			_api_conflict=true; break
 		fi
-		if grep -qE '\"listen_port\": *'"$API_PORT"'([^0-9]|$)' "$_cf" 2>/dev/null; then
+		if grep -qE '"listen_port"[[:space:]]*:[[:space:]]*'"$API_PORT"'([^0-9]|$)' "$_cf" 2>/dev/null; then
 			_api_conflict=true; break
 		fi
 	done
-	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","core_installed":%s,"channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","api_port_busy":%s,"api_port_conflict":%s,"dashboard":%s,"clash_api":%s,"config_check":"%s","api_source":"%s","clash_source":"%s"}\n' \
-		"$_running" "$_pid" "$_enabled" "$(json_esc "$_ver")" "$(cat "$ACTIVE_FILE" 2>/dev/null)" "$_core_installed" \
-		"$CHANNEL" "$(detect_arch)" "$(json_esc "$CORE_PATH")" "$(json_esc "$CONF_DIR")" "$_nfiles" \
+	printf '{"ok":true,"running":%s,"pid":"%s","enabled":%s,"version":"%s","active":"%s","core_installed":%s,"channel":"%s","arch":"%s","core_path":"%s","conf_dir":"%s","conf_files":%s,"api":"%s:%s","api_port_busy":%s,"api_port_conflict":%s,"dashboard":%s,"config_check":"%s","api_source":"%s"}\n' \
+		"$_running" "$_pid" "$_enabled" "$(json_esc "$_ver")" "$(json_esc "$(cat "$ACTIVE_FILE" 2>/dev/null)")" "$_core_installed" \
+		"$(json_esc "$CHANNEL")" "$(detect_arch)" "$(json_esc "$CORE_PATH")" "$(json_esc "$CONF_DIR")" "$_nfiles" \
 		"$API_LISTEN" "$API_PORT" "$_port_busy" "$_api_conflict" "$([ "$DASHBOARD" = 1 ] && echo true || echo false)" \
-		"$([ "$CLASH_API" = 1 ] && echo true || echo false)" "$_chk" "$_api_src" "$_clash_src"
+		"$_chk" "$_api_src"
 }
 
 do_installed() {
 	printf '{"ok":true,"active":"%s","previous":"%s","versions":[' \
-		"$(cat "$ACTIVE_FILE" 2>/dev/null)" "$(cat "$STATE_DIR/previous" 2>/dev/null)"
+		"$(json_esc "$(cat "$ACTIVE_FILE" 2>/dev/null)")" "$(json_esc "$(cat "$STATE_DIR/previous" 2>/dev/null)")"
 	_first=1
 	for f in "$INSTALL_DIR"/sing-box-*; do
 		case "$f" in *.meta) continue;; esac
@@ -683,7 +940,7 @@ do_installed() {
 		_v=${f##*/sing-box-}
 		_meta="$INSTALL_DIR/sing-box-${_v}.meta"
 		_sha=$(sed -n 's/.*"sha256":"\([^"]*\)".*/\1/p' "$_meta" 2>/dev/null)
-		printf '{"version":"%s","sha256":"%s","size":%s}' "$_v" "$_sha" "$(wc -c < "$f" | tr -d ' ')"
+		printf '{"version":"%s","sha256":"%s","size":%s}' "$(json_esc "$_v")" "$(json_esc "$_sha")" "$(wc -c < "$f" | tr -d ' ')"
 	done
 	printf ']}\n'
 }
@@ -692,10 +949,10 @@ do_log() {
 	_n=${1:-200}
 	_esc=$(printf '\033')
 	printf '{"ok":true,"log":"'
-	# 去掉 ANSI 颜色序列与其余控制字符：raw 控制字符会让 JSON 非法，前端 JSON.parse 直接失败（页面空白）
+	# Strip ANSI colors and control characters (incl. CR): raw control chars break the JSON and blank the page
 	logread 2>/dev/null | grep -E 'isongwrt|sing-box' | tail -n "$_n" \
 		| sed "s/${_esc}\[[0-9;]*[A-Za-z]//g" \
-		| tr -d '\000-\010\013\014\016-\037' \
+		| tr -d '\000-\010\013\014\015\016-\037' \
 		| json_ml
 	printf '"}\n'
 }
@@ -752,18 +1009,32 @@ case "${1:-status}" in
 	                [ "$_f" = 1 ] || printf ','; _f=0; printf '"%s"' "$_r"
 	              done; printf ']}\n'; } ;;
 	installed)   do_installed ;;
-	install)     do_install "${2:-stable}" "${3:-}" ;;
-	install-bg)     do_install_bg "${2:-stable}" "${3:-}" ;;
+	install)     _ch="${2:-stable}"; _pin="${3:-}"
+	             case "$_pin" in [0-9]*) _pin="v$_pin" ;; esac
+	             [ -z "$_pin" ] || valid_tag "$_pin" || die "Invalid version tag: $_pin (expected e.g. v1.15.0-alpha.6)"
+	             do_install "$_ch" "$_pin" ;;
+	install-bg)     _ch="${2:-stable}"; _pin="${3:-}"
+	             case "$_pin" in [0-9]*) _pin="v$_pin" ;; esac
+	             [ -z "$_pin" ] || valid_tag "$_pin" || die "Invalid version tag: $_pin (expected e.g. v1.15.0-alpha.6)"
+	             do_install_bg "$_ch" "$_pin" ;;
 	install-status) do_install_status ;;
-	activate)    do_activate "${2:?}" ;;
+	activate)    _v="${2:-}"; require_version "$_v"; do_activate "$_v" ;;
 	rollback)    do_rollback ;;
-	remove)      do_remove "${2:?}" "${3:-}" ;;
+	remove)      _v="${2:-}"; require_version "$_v"; do_remove "$_v" "${3:-}" ;;
 	config-list)    do_config_list ;;
-	config-get)     do_config_get "${2:?}" ;;
-	config-save)    do_config_save "${2:?}" "${3:-}" ;;
-	config-restore) do_config_restore "${2:?}" ;;
-	conf-fix-remote) do_conf_fix_remote "${2:?}" "${3:-}" ;;
-	config-backup)  mkdir -p "$BACKUP_DIR"; _d="$BACKUP_DIR/snapshot-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$_d"; cp "$CONF_DIR"/*.json "$_d/" 2>/dev/null; ok ",\"snapshot\":\"$(json_esc "$_d")\"" ;;
+	config-get)     _n="${2:-}"; [ -n "$_n" ] || die "config-get requires a config name"; do_config_get "$_n" ;;
+	config-save)    _n="${2:-}"; [ -n "$_n" ] || die "config-save requires a config name"; do_config_save "$_n" "${3:-}" ;;
+	config-restore) _n="${2:-}"; [ -n "$_n" ] || die "config-restore requires a backup file name"; do_config_restore "$_n" ;;
+	conf-fix-remote) _n="${2:-}"; [ -n "$_n" ] || die "conf-fix-remote requires a config name"; do_conf_fix_remote "$_n" "${3:-}" ;;
+	# Snapshot is archive-only: written to $BACKUP_DIR/snapshots/<timestamp>/ and never offered for restore
+	config-backup)  init_dirs; _d="$BACKUP_DIR/snapshots/$(date +%Y%m%d-%H%M%S)-$$"
+	             mkdir -p "$_d" || die "Cannot create the snapshot directory: $_d"
+	             _n=0
+	             for _cf in "$CONF_DIR"/*.json; do
+	                 [ -f "$_cf" ] || continue
+	                 cp "$_cf" "$_d/" && _n=$((_n + 1))
+	             done
+	             ok ",\"snapshot\":\"$(json_esc "$_d")\",\"files\":$_n,\"note\":\"archive only: snapshots cannot be restored from the panel\"" ;;
 	api-sync)    do_api_sync ;;
 	api-secret-new) do_api_secret_new ;;
 	check)       if _e=$(CONF_CHECK 2>&1); then ok; else die "$(printf '%s' "$_e" | tail -3 | tr '\n' ' ')"; fi ;;
@@ -778,7 +1049,8 @@ case "${1:-status}" in
 					while [ "$_j" -lt 6 ] && pgrep -f "$CORE_PATH run" >/dev/null 2>&1; do
 						sleep 1; _j=$((_j + 1))
 					done
-					pkill -f "$CORE_PATH run" >/dev/null 2>&1
+					# OpenWrt's default busybox has no pkill: use pgrep + xargs -r kill as the hard-stop fallback
+					pgrep -f "$CORE_PATH run" 2>/dev/null | xargs -r kill 2>/dev/null
 				fi
 				case "$2" in
 					start|restart)

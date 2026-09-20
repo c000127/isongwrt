@@ -28,6 +28,17 @@ if [ -z "$(uci -q get isongwrt.main.api_secret)" ]; then
 	uci commit isongwrt
 fi
 
+# Migration: drop the legacy Clash API keys. The Clash API is no longer part of
+# this app — only the native sing-box API service is generated (see ctl api-sync).
+# /etc/config/isongwrt is a conffile, so an upgrade may keep the old keys around.
+_legacy=0
+for _key in clash_api clash_port clash_secret; do
+	if uci -q get "isongwrt.main.$_key" >/dev/null 2>&1; then
+		uci -q delete "isongwrt.main.$_key" && _legacy=1
+	fi
+done
+[ "$_legacy" = "1" ] && uci -q commit isongwrt
+
 # 建立开机启动链接：实际是否随系统启动由 UCI 的 enabled 决定（见 init 脚本）
 /etc/init.d/isongwrt enable 2>/dev/null
 

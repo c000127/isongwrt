@@ -190,7 +190,10 @@ return view.extend({
 				var v = opt && opt.formvalue('main');
 				if (v !== null && v !== undefined && v !== '')
 					return v;
-			} catch (e) { /* 忽略：回退到已保存值 */ }
+			} catch (e) {
+				/* Falling back to the saved value is intended, but keep it diagnosable */
+				console.warn('isongwrt: cannot read the live form value, falling back to the saved value', e);
+			}
 			return null;
 		}
 
@@ -210,8 +213,13 @@ return view.extend({
 			try {
 				if (typeof self.handleSave === 'function')
 					prep = Promise.resolve(self.handleSave(null)).then(function () { return uci.apply(); });
-			} catch (e) { prep = Promise.resolve(); }
-			return prep.catch(function () { /* 忽略，用实时控件值兜底 */ });
+			} catch (e) {
+				console.warn('isongwrt: saving the settings before install failed, using the live values', e);
+				prep = Promise.resolve();
+			}
+			return prep.catch(function (e) {
+				console.warn('isongwrt: saving the settings before install failed, using the live values', e);
+			});
 		}
 
 		function install() {
@@ -225,26 +233,46 @@ return view.extend({
 			var pre = E('pre', {
 				'style': 'max-height:40vh;overflow:auto;white-space:pre-wrap;font-size:12px;background:#111;color:#ddd;padding:8px'
 			}, '正在启动安装任务…');
-			ui.showModal('安装 ' + label, [ pre, E('div', { 'class': 'right' }, [
-				E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭')
+			var fail = E('div', { 'style': 'color:#c60;margin:.5rem 0 0;display:none' }, '');
+
+			var timer = null, polls = 0;
+			function stop() { if (timer) { clearInterval(timer); timer = null; } }
+
+			/* Terminal state: stop polling and leave the log on screen to be read */
+			function finish(msg) {
+				stop();
+				fail.textContent = msg;
+				fail.style.display = '';
+				return reload();
+			}
+
+			ui.showModal('安装 ' + label, [ pre, fail, E('div', { 'class': 'right' }, [
+				/* Closing the window must stop the poller as well */
+				E('button', { 'class': 'btn', 'click': function () { stop(); ui.hideModal(); } }, '关闭')
 			]) ]);
 
-			var timer = null;
-			function stop() { if (timer) { clearInterval(timer); timer = null; } }
 			function pollInstall() {
 				return iso.call(['install-status']).then(function (r) {
 					pre.textContent = (r && r.log) || '(无输出)';
 					pre.scrollTop = pre.scrollHeight;
-					if (!r || r.state === 'done') {
+					polls++;
+
+					/* Unparsable status (ctl failed, empty output): never poll forever */
+					if (!r || r.ok === false)
+						return finish('❌ 无法读取安装状态：' + ((r && r.error) || '未知错误'));
+
+					if (r.state === 'done') {
 						stop(); ui.hideModal();
 						iso.notify({ ok: true }, '安装完成');
 						return reload();
 					}
-					if (r.state === 'failed') {
-						stop();
-						iso.notify({ ok: false, error: '安装失败，详见进度窗口日志' }, '');
-						return reload();
-					}
+					if (r.state === 'failed')
+						return finish('❌ 安装失败，详见上方日志');
+					/* idle = no installer process and no result in the log: the task
+					   died without reporting. Tolerate it on the first poll only —
+					   the background job may not have written its lock file yet. */
+					if (r.state === 'idle' && polls > 1)
+						return finish('❌ 安装任务已不在运行（idle），可能被中断，详见上方日志');
 				});
 			}
 
@@ -260,7 +288,6 @@ return view.extend({
 			'内核取自官方 Releases（SagerNet/sing-box），按本机架构自动匹配、优先 musl 构建；本项目不编译内核。点「安装 / 升级」会自动先保存当前设置。');
 
 		s = m.section(form.NamedSection, 'main', 'isongwrt', '安装设置');
-		s.anonymous = true;
 
 		o = s.option(form.ListValue, 'channel', '渠道');
 		CHANNELS.forEach(function (c) { o.value(c, c); });

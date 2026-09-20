@@ -36,38 +36,25 @@ function get(opt, def) {
 	return (v === null || v === undefined || v === '') ? def : v;
 }
 
-function set(opt, val) {
-	uci.set('isongwrt', 'main', opt, val);
-}
-
-function applyUci() {
-	return uci.save().then(function () { return uci.apply(); });
-}
-
 /* ---- 提醒：统一为弹窗（不再向页面顶部插入 alert-message，避免挤动布局） ---- */
-var _noticeOpen = false;
-
-function closeNotice() {
-	if (_noticeOpen) {
-		ui.hideModal();
-		_noticeOpen = false;
-	}
-}
 
 function notice(title, body, opts) {
-	closeNotice();
 	var body_nodes = Array.isArray(body) ? body : [ body ];
 	var timer = null;
+	var btn = E('button', { 'class': 'btn cbi-button', 'click': close }, '关闭');
+
+	/* Closing our own dialog must not hide whatever modal is on screen by then:
+	   an auto-close timer may fire after another modal replaced this notice. */
 	function close() {
 		if (timer) { clearTimeout(timer); timer = null; }
-		closeNotice();
+		if (dlg && dlg.contains(btn))
+			ui.hideModal();
 	}
-	ui.showModal(title, body_nodes.concat([
-		E('div', { 'class': 'right', 'style': 'margin-top:.75rem' }, [
-			E('button', { 'class': 'btn cbi-button', 'click': close }, '关闭')
-		])
+
+	var dlg = ui.showModal(title, body_nodes.concat([
+		E('div', { 'class': 'right', 'style': 'margin-top:.75rem' }, [ btn ])
 	]));
-	_noticeOpen = true;
+
 	if (opts && opts.autoClose)
 		timer = setTimeout(close, opts.autoClose);
 }
@@ -115,10 +102,14 @@ function handleSave(ev) {
 }
 
 function handleSaveApply(ev, mode) {
+	/* Save silently (silent=true, no duplicate top-of-page notification) and hand
+	   the apply over to LuCI: `mode == '0'` means "Save & Apply", which must stay a
+	   checked apply (connectivity confirmation + automatic rollback on timeout).
+	   LuCI's own apply flow already reports progress and the result, so no extra
+	   success modal is raised here — it would appear before the apply actually
+	   succeeded and could contradict a cancelled confirmation dialog. */
 	return saveMaps(true).then(function () {
-		return ui.changes.apply(false);            // 提交并触发 procd reload（LuCI 自身状态为弹窗）
-	}).then(function () {
-		return alert('设置已保存并应用', 'ok', '已应用');
+		return ui.changes.apply(mode == '0');
 	}).catch(function (e) {
 		alert(String((e && e.message) || e), 'error', '保存失败');
 		throw e;
@@ -145,8 +136,6 @@ return baseclass.extend({
 	handleSaveApply: handleSaveApply,
 	loadUci: loadUci,
 	get: get,
-	set: set,
-	applyUci: applyUci,
 	notify: notify,
 	busy: busy
 });

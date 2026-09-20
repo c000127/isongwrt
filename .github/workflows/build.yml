@@ -4,28 +4,72 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    # Only build inputs are listed here: a pure docs/rules commit does not build or
+    # publish anything. Release-cli changes (install.sh, feed.sh, server/**) are not
+    # build inputs either -- they are covered by the `syntax` job when this workflow
+    # runs (tag push / workflow_dispatch) or after a decision to widen this list.
     paths:
       - 'luci-app-isongwrt/**'
       - '.github/workflows/build.yml'
     tags:
       - 'v*'
 
+# Two pushes that overlap must not race on the `feed` branch or on release assets:
+# the newer run cancels the older one instead of letting it finish last.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: read by default, write only in the jobs that publish
+# (release: release assets, feed: the feed branch).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  # 说明：CI 只构建 LuCI 应用包（luci-app-isongwrt）。
-  # sing-box 内核不在此编译——由面板「内核管理」从官方 Releases 下载匹配架构的内核。
+  # Parse-only gate. A syntax error in feed.sh once shipped unnoticed and silently
+  # broke the whole feed install path, so every script is parsed on each run.
+  syntax:
+    name: shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        # actions/checkout v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: sh -n / dash -n / bash -n
+        run: |
+          set -euo pipefail
+          for f in \
+            install.sh \
+            feed.sh \
+            luci-app-isongwrt/root/usr/lib/isongwrt/ctl \
+            luci-app-isongwrt/root/etc/init.d/isongwrt \
+            luci-app-isongwrt/root/etc/uci-defaults/99-isongwrt
+          do
+            [ -f "$f" ] || { echo "missing: $f"; exit 1; }
+            echo "-> $f"
+            sh -n "$f"
+            bash -n "$f"
+            dash -n "$f"
+          done
+          # Bash-only script (arrays): dash is expected to fail here, bash must not.
+          echo "-> server/singbox-deploy.sh"
+          bash -n server/singbox-deploy.sh
+          echo "all scripts parsed OK"
+
+  # CI only builds the LuCI app package (luci-app-isongwrt).
+  # The sing-box core is not compiled here: the panel downloads a matching core from
+  # the official Releases.
   build:
     name: ${{ matrix.arch }}-${{ matrix.branch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # 串行执行：两个分支并发出镜像/SDK 缓存争用（日志可见 "Unable to reserve cache"），
-      # 会造成 host-compile 偶发失败
+      # Serialised: two branches in parallel fight over the image/SDK cache
+      # ("Unable to reserve cache" in the logs) and host-compile fails intermittently.
       max-parallel: 1
-      # 仅构建当前需要的目标：x86_64 的 24.10(ipk) 与 25.12(apk)。
-      # 后续需要其它架构/分支时，在下面两行里加回来即可（例如 aarch64_cortex-a53、SNAPSHOT）。
+      # Only the targets that are needed today: x86_64 on 24.10 (ipk) and 25.12 (apk).
+      # Add rows back here (aarch64_cortex-a53, SNAPSHOT, ...) when they are needed.
       matrix:
         arch:
           - x86_64
@@ -35,36 +79,46 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        # actions/checkout v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
 
       - name: build
-        uses: openwrt/gh-action-sdk@main
+        # openwrt/gh-action-sdk@main pinned to the commit it pointed at on 2026-08-04.
+        # It receives the usign signing key, so a floating ref would let the action's
+        # owner replace the code that handles it (and write to this repository).
+        uses: openwrt/gh-action-sdk@f5813d30eeef3534b58ac7e79c5d8842b6035434
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.branch }}
           FEEDNAME: isongwrt
           PACKAGES: luci-app-isongwrt
-          # INDEX=1 → 生成 feed 索引（ipk: Packages.gz / apk: packages.adb）
+          # INDEX=1 -> build the feed index (ipk: Packages.gz / apk: packages.adb)
           INDEX: 1
-          # 按分支分别签名：
-          #  - 24.10（opkg/ipk）：usign 密钥签名 feed（已验证可用）
-          #  - 25.12（apk）：SDK 侧 apk 签名构建目前失败（luci-base/lua host-compile 报错），
-          #    故暂不传 PRIVATE_KEY → 索引未签名，客户端用 --allow-untrusted（脚本已自动处理）
-          KEY_BUILD: ${{ matrix.branch == 'openwrt-24.10' && secrets.KEY_BUILD || '' }}
-          # apk 签名（PRIVATE_KEY）暂不启用：SDK 侧 25.12 带签名构建会失败
-          # （luci-base/lua host-compile 报错，疑与 CONFIG_SIGNED_PACKAGES 下的构建差异有关）。
-          # 因此 25.12 的索引未签名，客户端由 feed.sh/install.sh 自动加 --allow-untrusted。
+          # Signing key, per branch:
+          #  - 24.10 (opkg/ipk): the usign key signs the feed (verified working)
+          #  - 25.12 (apk): apk signing fails in this SDK (luci-base/lua host-compile
+          #    errors), so the index stays unsigned and clients pass --allow-untrusted
+          # The key is also restricted to main and v* tags: a workflow_dispatch run
+          # from an arbitrary branch must not be able to use it (review P3-14).
+          KEY_BUILD: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && matrix.branch == 'openwrt-24.10' && secrets.KEY_BUILD || '' }}
+          # apk signing (PRIVATE_KEY) is not enabled: a signed 25.12 build fails in the
+          # SDK (luci-base/lua host-compile under CONFIG_SIGNED_PACKAGES). Therefore the
+          # 25.12 index is unsigned and feed.sh/install.sh add --allow-untrusted.
           # PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           NO_REFRESH_CHECK: true
+          # Consider an `environment:` with required reviewers here to gate the signing
+          # key behind a manual approval.
 
       - name: stage-feed
         run: |
+          set -euo pipefail
           mkdir -p public/${{ matrix.branch }}/${{ matrix.arch }}
           cp -r bin/packages/${{ matrix.arch }}/isongwrt public/${{ matrix.branch }}/${{ matrix.arch }}/
           tar -c -z -f isongwrt_${{ matrix.arch }}-${{ matrix.branch }}.tar.gz \
             -C bin/packages/${{ matrix.arch }} isongwrt
 
       - name: upload
-        uses: actions/upload-artifact@v7
+        # actions/upload-artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: isongwrt_${{ matrix.arch }}-${{ matrix.branch }}
           path: |
@@ -72,7 +126,8 @@ jobs:
             isongwrt_${{ matrix.arch }}-${{ matrix.branch }}.tar.gz
 
       - name: upload-feed
-        uses: actions/upload-artifact@v7
+        # actions/upload-artifact v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: feed_${{ matrix.arch }}-${{ matrix.branch }}
           path: public
@@ -80,15 +135,22 @@ jobs:
   release:
     name: release packages
     needs: build
+    # Publishing is limited to main and v* tags: a dispatch run from a feature branch
+    # only produces artifacts, it never overwrites the latest release or a tag.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        # actions/checkout v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 20
 
       - name: download
-        uses: actions/download-artifact@v8
+        # actions/download-artifact v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: isongwrt_*
           merge-multiple: true
@@ -96,22 +158,31 @@ jobs:
 
       - name: checksums
         run: |
+          set -euo pipefail
           cd pkgs
-          find . -name '*.ipk' -o -name '*.apk' | sort | xargs -r sha256sum > SHA256SUMS.txt
+          # Basenames only: users can run `sha256sum -c SHA256SUMS.txt` in the directory
+          # where the assets were downloaded (older releases recorded build paths).
+          # install.sh matches entries by basename and accepts both forms.
+          find . -type f \( -name '*.ipk' -o -name '*.apk' -o -name '*.tar.gz' \) -print0 \
+            | sort -z \
+            | xargs -0 -r sha256sum \
+            | awk '{ n=$2; sub(/^\.\//, "", n); sub(/^.*\//, "", n); print $1 "  " n }' \
+            > SHA256SUMS.txt
+          test -s SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: release body
         id: body
         run: |
+          set -euo pipefail
           PKGVER=$(grep -m1 '^PKG_VERSION:=' luci-app-isongwrt/Makefile | cut -d= -f2)
           PKGREL=$(grep -m1 '^PKG_RELEASE:=' luci-app-isongwrt/Makefile | cut -d= -f2)
           SHORT_SHA=$(git rev-parse --short HEAD)
-          SUBJECT=$(git log -1 --pretty=%s)
           BUILT=$(date -u '+%Y-%m-%d %H:%M UTC')
 
-          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
-            NAME="isongwrt ${{ github.ref_name }}"
-            KIND="release (tag \`${{ github.ref_name }}\`)"
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            NAME="isongwrt ${GITHUB_REF_NAME}"
+            KIND="release (tag \`${GITHUB_REF_NAME}\`)"
             NOTE=""
           else
             NAME="rolling build (main, $(date -u +%Y-%m-%d))"
@@ -140,7 +211,7 @@ jobs:
           wget -O - https://cdn.jsdelivr.net/gh/c000127/isongwrt@main/install.sh | sh
           ```
 
-          From the assets below:
+          From the assets below (verify the download first: `sha256sum -c SHA256SUMS.txt`):
 
           ```sh
           opkg install luci-app-isongwrt_*_all.ipk     # OpenWrt 24.10
@@ -154,27 +225,34 @@ jobs:
           | `luci-app-isongwrt_*_all.ipk` | OpenWrt 24.10 / opkg |
           | `luci-app-isongwrt-*.apk` | OpenWrt 25.12 / apk |
           | `isongwrt_x86_64-*.tar.gz` | package directory with the feed index |
-          | `SHA256SUMS.txt` | checksums |
+          | `SHA256SUMS.txt` | sha256 of every asset (basenames) |
 
           ## Notes
 
           - No core is bundled: the app installs cores from the official
             [SagerNet/sing-box](https://github.com/SagerNet/sing-box/releases) releases,
             matched to the target architecture.
-          - Feed: `https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed` (the ipk index is signed
-            with usign and the public key ships with the feed; the apk index is unsigned, so the
-            install script passes `--allow-untrusted`).
+          - Install script: a package taken from Releases is installed only after its
+            sha256 matches this release's `SHA256SUMS.txt`.
+          - Feed: `https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed`. The ipk index is
+            signed with usign and its public key ships with the feed. The apk index is
+            **unsigned** (no apk key is published), so the install script passes
+            `--allow-untrusted` there.
           - After installing, reload LuCI; menu: **Services → isongwrt**.
 
           TPL
 
-          sed -i -e "s|__VER__|${PKGVER}-r${PKGREL}|" \
-                 -e "s|__KIND__|${KIND}|" \
-                 -e "s|__SHA__|${SHORT_SHA}|" \
-                 -e "s|__SUBJECT__|${SUBJECT}|" \
-                 -e "s|__BUILT__|${BUILT}|" \
-                 -e "s|__NOTE__|${NOTE}|" body.md
-          # 多行提交列表单独替换
+          # Values come from the Makefile and from a tag name, so they may contain & or |
+          # (sed: "whole match" and the delimiter) or a backslash: escape them explicitly.
+          # `${var//x/y}` is not an option here: bash >= 5.2 expands & in the replacement.
+          esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+          sed -i \
+            -e "s|__VER__|$(esc "${PKGVER}-r${PKGREL}")|" \
+            -e "s|__KIND__|$(esc "$KIND")|" \
+            -e "s|__SHA__|$(esc "$SHORT_SHA")|" \
+            -e "s|__BUILT__|$(esc "$BUILT")|" \
+            -e "s|__NOTE__|$(esc "$NOTE")|" \
+            body.md
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "--- body.md ---"; cat body.md
 
@@ -182,19 +260,38 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -uo pipefail
           TAG="latest"
-          case "${{ github.ref }}" in refs/tags/*) TAG="${{ github.ref_name }}" ;; esac
-          gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | while read -r name; do
+          case "${GITHUB_REF:-}" in refs/tags/*) TAG="${GITHUB_REF#refs/tags/}" ;; esac
+          stale=()
+          while IFS= read -r name; do
             [ -n "$name" ] || continue
-            if ! find pkgs -name "$name" | grep -q .; then
-              echo "deleting stale asset: $name"
-              gh release delete-asset "$TAG" "$name" --yes || true
-            fi
-          done || true
+            # Only assets this workflow owns may be pruned.
+            case "$name" in
+              *.ipk|*.apk|*.tar.gz|SHA256SUMS.txt) ;;
+              *) echo "keeping (not managed by this workflow): $name"; continue ;;
+            esac
+            find pkgs -name "$name" | grep -q . || stale+=("$name")
+          done < <(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)
+
+          if [ ${#stale[@]} -eq 0 ]; then
+            echo "no stale assets on ${TAG}"
+            exit 0
+          fi
+          # Print the full list (and keep it in the job summary) before deleting anything.
+          {
+            echo "### stale assets on \`${TAG}\`"
+            printf -- '- %s\n' "${stale[@]}"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+          for name in "${stale[@]}"; do
+            echo "deleting stale asset: $name"
+            gh release delete-asset "$TAG" "$name" --yes || true
+          done
 
       - name: release (tag)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
+        # softprops/action-gh-release v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           name: ${{ steps.body.outputs.name }}
           body_path: body.md
@@ -207,7 +304,8 @@ jobs:
 
       - name: release (latest)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: softprops/action-gh-release@v3
+        # softprops/action-gh-release v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: latest
           name: ${{ steps.body.outputs.name }}
@@ -223,26 +321,38 @@ jobs:
   feed:
     name: publish feed branch
     needs: build
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: download
-        uses: actions/download-artifact@v8
+        # actions/download-artifact v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: feed_*
           merge-multiple: true
           path: public
 
-      - name: public keys
+      - name: feed signing key
         env:
           KEY_BUILD_PUB: ${{ secrets.KEY_BUILD_PUB }}
-          PUBLIC_KEY: ${{ secrets.PUBLIC_KEY }}
         run: |
-          if [ -n "$KEY_BUILD_PUB" ]; then printf '%s\n' "$KEY_BUILD_PUB" > public/key-build.pub; fi
-          if [ -n "$PUBLIC_KEY" ]; then printf '%s\n' "$PUBLIC_KEY" > public/public-key.pem; fi
+          set -euo pipefail
+          # opkg (24.10) verifies the signed index with this key, so it is published.
+          # The apk (25.12) index is built unsigned, therefore no apk public key is
+          # published: a key that verifies nothing would wrongly suggest the apk feed
+          # is signed. feed.sh tells the user the apk index is unsigned instead.
+          if [ -n "${KEY_BUILD_PUB}" ]; then
+            printf '%s\n' "$KEY_BUILD_PUB" > public/key-build.pub
+          else
+            echo "KEY_BUILD_PUB is not set: the feed will carry no opkg signing key"
+          fi
           find public -maxdepth 3 -type f | sort | head -20
 
       - name: publish
-        uses: peaceiris/actions-gh-pages@v4
+        # peaceiris/actions-gh-pages v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: feed

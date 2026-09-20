@@ -21,9 +21,25 @@ return view.extend({
 			st = st || {};
 			return [ st.running, st.pid, st.enabled, st.version, st.active, st.core_installed,
 				st.channel, st.arch, st.core_path, st.conf_dir, st.conf_files,
-				st.api, st.api_port_busy, st.dashboard, st.clash_api, st.config_check ].join('|');
+				st.api, st.api_port_busy, st.dashboard, st.config_check ].join('|');
 		}
 		var lastSig = signature(self.status);
+		var dirty = false;
+		var staleHint = null;
+
+		/* Re-render the form from UCI, but never while the user has unsaved edits:
+		   m.reset() would discard them without asking. */
+		function refreshStatusView() {
+			if (dirty) {
+				if (staleHint) {
+					staleHint.textContent =
+						'Status changed — save or discard your edits to refresh the values on this page.';
+					staleHint.style.display = '';
+				}
+				return Promise.resolve();
+			}
+			return m.reset();
+		}
 
 		function act(args, label) {
 			return iso.busy(iso.call(args), label + '…').then(function (r) {
@@ -31,7 +47,7 @@ return view.extend({
 				return iso.call(['status']).then(function (st) {
 					self.status = st || {};
 					lastSig = signature(self.status);
-					return m.reset();
+					return refreshStatusView();
 				});
 			});
 		}
@@ -56,14 +72,13 @@ return view.extend({
 		function apiText(st) {
 			var t = (st.api || '-');
 			if (st.dashboard) t += '，官方面板已启用';
-			if (st.clash_api) t += '，Clash API 已启用';
 			return t;
 		}
 
 		function warnText(st) {
 			if (st.api_port_conflict)
 				return E('span', { 'style': 'color:#c60' },
-					'API 端口与配置文件内的 clash_api/入站端口相同：内核会启动后立刻退出，请二选一改端口（配置里改 clash_api，或到「面板」页改 API 端口）');
+					'Same port as an inbound in your config: the core exits right after start — change the API port on the 面板 page.');
 			if (st.api_port_busy)
 				return E('span', { 'style': 'color:#c60' }, 'API 端口被占用：请到「面板」页改用其它端口，否则内核无法启动');
 			if (st.core_installed === false)
@@ -76,7 +91,6 @@ return view.extend({
 		/* 用 NamedSection（指向已存在的 main 段）→ 每个项目独占一行，纵向显示；
 		   TableSection 会把选项当“列”渲染成横向表头，故不适用。 */
 		s = m.section(form.NamedSection, 'main', 'isongwrt', '状态');
-		s.anonymous = true;
 
 		o = s.option(form.DummyValue, '_running', '运行状态');
 		o.cfgvalue = value(function (st) { return runningText(st); });
@@ -119,25 +133,46 @@ return view.extend({
 		};
 
 		s = m.section(form.NamedSection, 'main', 'isongwrt', '设置');
-		s.anonymous = true;
 		o = s.option(form.Flag, 'enabled', '开机自启', '随系统启动并自动拉起。');
 
 		poll.add(function () {
 			return iso.call(['status']).then(function (st) {
 				st = st || {};
 				var sig = signature(st);
-				if (sig !== lastSig) {
-					lastSig = sig;
-					self.status = st;
-					return m.reset();
-				}
+				if (sig === lastSig)
+					return;
+				lastSig = sig;
+				self.status = st;
+				return refreshStatusView();
 			});
 		}, 5);
 
-		return m.render();
-	},
+		return m.render().then(function (mapNode) {
+			/* Any widget edit marks the form dirty; it is cleared on save / reset */
+			mapNode.addEventListener('change', function () { dirty = true; });
+			mapNode.addEventListener('input', function () { dirty = true; });
 
-	/* 保存/应用：弹窗式提醒（见 tools/isongwrt.js） */
-	handleSave: iso.handleSave,
-	handleSaveApply: iso.handleSaveApply
+			staleHint = E('div', { 'class': 'cbi-section', 'style': 'color:#c60;display:none' }, '');
+
+			/* Wrap the shared handlers so a successful save/reset clears the flag */
+			var clearDirty = function (fn) {
+				return function (ev, mode) {
+					return Promise.resolve(fn.call(iso, ev, mode)).then(function (r) {
+						dirty = false;
+						staleHint.style.display = 'none';
+						return r;
+					});
+				};
+			};
+			self.handleSave = clearDirty(iso.handleSave);
+			self.handleSaveApply = clearDirty(iso.handleSaveApply);
+			self.handleReset = function (ev) {
+				dirty = false;
+				staleHint.style.display = 'none';
+				return view.prototype.handleReset.call(self, ev);
+			};
+
+			return E('div', {}, [ staleHint, mapNode ]);
+		});
+	}
 });

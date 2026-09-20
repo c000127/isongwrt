@@ -23,6 +23,9 @@ return view.extend({
 				'font-size:12px;background:#111;color:#ddd;padding:8px;border-radius:4px'
 		}, self.log || '（暂无日志）');
 
+		/* Style-only container: it reuses the standard `cbi-map` spacing but is NOT
+		   a form.Map instance, so `iso.saveMaps()` (dom.findClassInstance) skips it.
+		   This page has no UCI options — the three handlers below are disabled. */
 		self.root = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, '日志'),
 			E('div', { 'class': 'cbi-section' }, [

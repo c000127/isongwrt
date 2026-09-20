@@ -6,6 +6,8 @@
 'require tools.isongwrt as iso';
 
 var UPLOAD_TMP = '/tmp/isongwrt-upload.json';
+var NEW_SHARD = '10-user';
+var MAX_BACKUPS = 10;
 
 function btn(label, style, fn) {
 	return E('button', { 'class': 'btn cbi-button cbi-button-' + style, 'click': fn }, label);
@@ -21,6 +23,26 @@ function row(title, field, desc) {
 	]);
 }
 
+/* Backups are reported as plain file names with the timestamp embedded by ctl
+   (`<shard>-YYYYmmdd-HHMMSS.json`). An explicit mtime field, if the backend ever
+   reports one, takes precedence. */
+function backupName(b) {
+	return (b && typeof b === 'object') ? String(b.name || '') : String(b || '');
+}
+
+function backupTime(b) {
+	if (b && typeof b === 'object' && b.mtime != null && !isNaN(Number(b.mtime)))
+		return Number(b.mtime);
+	var m = /(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(backupName(b));
+	if (!m)
+		return 0;
+	return Date.parse(m[1] + '-' + m[2] + '-' + m[3] + 'T' + m[4] + ':' + m[5] + ':' + m[6]) || 0;
+}
+
+function shardName(self) {
+	return (self.current === '__new__') ? NEW_SHARD : self.current;
+}
+
 return view.extend({
 	load: function () {
 		return iso.call(['config-list']);
@@ -31,7 +53,7 @@ return view.extend({
 		self.list = list || {};
 		self.files = self.list.files || [];
 		self.backups = self.list.backups || [];
-		self.current = self.files.length ? self.files[0].name : '10-user';
+		self.current = self.files.length ? self.files[0].name : NEW_SHARD;
 		self.content = '';
 
 		self.editor = E('textarea', {
@@ -62,18 +84,30 @@ return view.extend({
 			dom.content(self.select, opts);
 		}
 
+		/* Newest first, most recent MAX_BACKUPS entries only */
+		function sortedBackups() {
+			return (self.backups || []).slice().sort(function (a, b) {
+				var ta = backupTime(a), tb = backupTime(b);
+				if (ta !== tb)
+					return tb - ta;
+				return backupName(a) < backupName(b) ? 1 : -1;
+			}).slice(0, MAX_BACKUPS);
+		}
+
 		function paintBackups() {
-			if (!self.backups.length) {
+			var list = sortedBackups();
+			if (!list.length) {
 				dom.content(self.backupBox, E('em', {}, '暂无备份'));
 				return;
 			}
 			dom.content(self.backupBox, E('table', { 'class': 'table' },
-				self.backups.slice(0, 10).map(function (b) {
+				list.map(function (b) {
+					var name = backupName(b);
 					return E('tr', { 'class': 'tr' }, [
-						E('td', { 'class': 'td left' }, b),
+						E('td', { 'class': 'td left' }, name),
 						E('td', { 'class': 'td right' }, btn('恢复', 'apply', function () {
-							return iso.busy(iso.call(['config-restore', b]), '恢复备份…').then(function (r) {
-								iso.notify(r, '已恢复 ' + b);
+							return iso.busy(iso.call(['config-restore', name]), '恢复备份…').then(function (r) {
+								iso.notify(r, '已恢复 ' + name);
 								return self.loadContent().then(function () {
 									self.editor.value = self.content;
 								});
@@ -83,6 +117,9 @@ return view.extend({
 				})));
 		}
 
+		self.paintSelect = paintSelect;
+		self.paintBackups = paintBackups;
+
 		paintSelect();
 		paintBackups();
 		self.loadContent().then(function () { self.editor.value = self.content; });
@@ -90,35 +127,28 @@ return view.extend({
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, '配置管理'),
 			E('div', { 'class': 'cbi-map-descr' },
-				'配置按分片目录加载（sing-box -C）：面板只维护 90-isongwrt-api.json，不会覆盖你的配置；保存前自动校验，失败自动回退。'),
+				'The core loads every shard of this directory (sing-box -C). The panel only injects its own ' +
+				'shard (90-isongwrt-api.json) and never rewrites the shards you provide — but saving or ' +
+				'uploading on this page does replace the shard selected above. The previous content is kept ' +
+				'as a backup first and restored automatically if validation fails.'),
 
 			E('div', { 'class': 'cbi-section' }, [
 				row('分片文件', self.select),
 				row('操作', E('div', {}, [
 					btn('校验并保存', 'apply', function () { return self.save(); }),
 					' ',
-					btn('创建快照', 'action', function () {
-						return iso.busy(iso.call(['config-backup']), '创建快照…').then(function (r) {
-							iso.notify(r, '快照已创建');
-							return iso.call(['config-list']).then(function (l) {
-								self.backups = (l && l.backups) || [];
-								paintBackups();
-							});
-						});
-					}),
-					' ',
 					E('input', {
 						'type': 'file', 'accept': '.json',
 						'style': 'display:inline-block;vertical-align:middle',
 						'change': function (ev) { return self.upload(ev); }
 					})
-				])),
+				]), 'Uploading a file replaces the shard selected above (confirmed before overwriting).')
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [ self.editor ]),
 
 			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, '备份（最近 10 条）'),
+				E('h3', {}, '备份（最近 ' + MAX_BACKUPS + ' 条）'),
 				self.backupBox
 			])
 		]);
@@ -126,8 +156,7 @@ return view.extend({
 
 	loadContent: function () {
 		var self = this;
-		var name = self.current === '__new__' ? '10-user' : self.current;
-		return iso.call(['config-get', name]).then(function (r) {
+		return iso.call(['config-get', shardName(self)]).then(function (r) {
 			self.content = (r && r.ok) ? (r.content || '') : '';
 			if (r && !r.ok) iso.notify(r, '');
 		});
@@ -135,7 +164,7 @@ return view.extend({
 
 	save: function () {
 		var self = this;
-		var name = self.current === '__new__' ? '10-user' : self.current;
+		var name = shardName(self);
 		if (!String(self.content || '').trim()) {
 			return iso.alert('内容为空：请先在上方编辑，或选择要上传的 .json 文件', 'warning', '无法保存');
 		}
@@ -147,29 +176,54 @@ return view.extend({
 			return iso.call(['config-list']).then(function (l) {
 				self.files = (l && l.files) || [];
 				self.backups = (l && l.backups) || [];
-				dom.content(self.select, self.files.map(function (f) {
-					return E('option', { 'value': f.name, 'selected': f.name === name ? '' : null },
-						f.name + '.json（' + f.size + ' B）');
-				}).concat([ E('option', { 'value': '__new__' }, '＋ 新建 10-user.json') ]));
-				var box = document.querySelector('#iso-backups');
-				if (box) dom.content(box, E([]));
+				/* Refresh both lists: the select (new/renamed shard) and the
+				   backup table (a fresh backup was just written). */
+				if (self.paintSelect) self.paintSelect();
+				if (self.paintBackups) self.paintBackups();
 			});
 		});
 	},
 
 	upload: function (ev) {
 		var self = this;
-		var file = ev.target.files && ev.target.files[0];
-		if (!file) return Promise.resolve();
+		var input = ev.target;
+		var file = input.files && input.files[0];
+		if (!file)
+			return Promise.resolve();
+
+		/* The upload replaces the shard currently selected in the drop-down */
+		var target = shardName(self);
+
 		return new Promise(function (resolve, reject) {
 			var reader = new FileReader();
 			reader.onload = function () { self.content = String(reader.result); resolve(); };
 			reader.onerror = reject;
 			reader.readAsText(file);
 		}).then(function () {
-			self.current = '10-user';
+			return new Promise(function (resolve) {
+				ui.showModal('上传配置', [
+					E('p', {}, '文件「' + file.name + '」的内容将写入 /etc/isongwrt/conf/' + target + '.json。'),
+					E('p', {}, '现有内容会先备份，新内容校验通过后才生效；校验失败自动回退。'),
+					E('div', { 'class': 'right' }, [
+						E('button', { 'class': 'btn', 'click': function () { ui.hideModal(); resolve(false); } }, '取消'),
+						' ',
+						E('button', { 'class': 'btn cbi-button cbi-button-apply', 'click': function () { ui.hideModal(); resolve(true); } },
+							'替换 ' + target + '.json')
+					])
+				]);
+			});
+		}).then(function (confirmed) {
+			/* Allow re-selecting the same file later on */
+			input.value = '';
+			if (!confirmed)
+				return;
+			self.current = target;
 			self.editor.value = self.content;
+			if (self.paintSelect) self.paintSelect();
 			return self.save();
+		}).catch(function (e) {
+			input.value = '';
+			iso.alert('读取文件失败：' + ((e && e.message) || e), 'error', '上传失败');
 		});
 	},
 

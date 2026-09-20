@@ -4,40 +4,59 @@ START=99
 STOP=10
 USE_PROCD=1
 
+# Regenerate the API / dashboard config shards from the current UCI.
+# This must run *before* the enabled gate in start_service(): "Save & Apply" is
+# delivered as a procd reload, and the settings have to be applied even when
+# autostart is off (enabled only means "start at boot").
+sync_shards() {
+	[ -x /usr/lib/isongwrt/ctl ] || return 0
+	/usr/lib/isongwrt/ctl api-sync >/dev/null 2>&1 || \
+		logger -t isongwrt "api-sync failed (keeping existing shards)"
+}
+
 start_service() {
 	local enabled core_path conf_dir work_dir
 	config_load isongwrt
 	config_get_bool enabled main enabled 0
+	config_get core_path main core_path /usr/lib/isongwrt/sing-box
+	config_get conf_dir  main conf_dir  /etc/isongwrt/conf
+	config_get work_dir  main work_dir  /etc/isongwrt
+
+	sync_shards
 
 	# enabled 仅表示“开机自启”；面板的「启动/重启」按钮为手动启动，不受其限制
 	if [ "$enabled" != "1" ] && [ "${ISONGWRT_MANUAL_START:-0}" != "1" ]; then
 		logger -t isongwrt "未启用开机自启（enabled=0），跳过启动"
 		return 0
 	fi
-	config_get core_path main core_path /usr/lib/isongwrt/sing-box
-	config_get conf_dir  main conf_dir  /etc/isongwrt/conf
-	config_get work_dir  main work_dir  /etc/isongwrt
 	[ -x "$core_path" ] || { logger -t isongwrt "core not found: $core_path"; return 1; }
 	[ -d "$conf_dir" ]  || { logger -t isongwrt "conf dir not found: $conf_dir"; return 1; }
-
-	# 依据当前 UCI 重新生成 API/面板分片（保存并应用 → procd reload → 这里生效）
-	if [ -x /usr/lib/isongwrt/ctl ]; then
-		/usr/lib/isongwrt/ctl api-sync >/dev/null 2>&1 || \
-			logger -t isongwrt "api-sync 失败（将使用现有分片）"
-	fi
 
 	procd_open_instance
 	procd_set_param command "$core_path" run -D "$work_dir" -C "$conf_dir"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
-	procd_set_param limits core 0
+	procd_set_param limits core=0
 	procd_close_instance
 }
 
+# "Save & Apply" reaches this path through procd's config.change trigger.
 reload_service() {
-	stop
-	start
+	if running; then
+		# Only restart a service that is really running, and keep the way it was
+		# started (enabled=0 + manual start) — otherwise applying settings would
+		# silently drop a core the user started on purpose.
+		stop
+		ISONGWRT_MANUAL_START=1
+		export ISONGWRT_MANUAL_START
+		start
+	else
+		# Not running: apply the settings to the shards only, never start a
+		# service the user stopped on purpose.
+		sync_shards
+		logger -t isongwrt "reload: service not running, shards refreshed only"
+	fi
 }
 
 service_triggers() {

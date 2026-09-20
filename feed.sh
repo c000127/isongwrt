@@ -44,7 +44,6 @@ JSD="https://cdn.jsdelivr.net/gh/c000127/isongwrt@feed"
 JSD2="https://fastly.jsdelivr.net/gh/c000127/isongwrt@feed"
 RAW="https://raw.githubusercontent.com/c000127/isongwrt/feed"
 
-# interactive selection: only when /dev/tty is readable
 # Interactive selection. It runs inside a subshell on purpose: on hosts without a
 # usable /dev/tty (pipe, container, cron) the redirection fails inside that subshell
 # only -- dash treats such a failure as fatal, so it must never happen in the main
@@ -52,7 +51,6 @@ RAW="https://raw.githubusercontent.com/c000127/isongwrt/feed"
 if [ -z "$SOURCE" ]; then
 	_ans=$( { printf 'Select feed source:\n  1) jsDelivr mirror (default)\n  2) GitHub direct\n  3) custom (ISONGWRT_FEED_BASE)\nNumber [1]: ' > /dev/tty; read -r _a < /dev/tty && printf '%s' "$_a"; } 2>/dev/null ) || _ans=""
 	case "$_ans" in 2) SOURCE=direct ;; 3) SOURCE=custom ;; *) SOURCE=mirror ;; esac
-fi
 fi
 SOURCE="${SOURCE:-mirror}"
 
@@ -83,17 +81,29 @@ done
 feed_root="${feed_url%/$branch/$arch/isongwrt}"
 if [ -x /bin/opkg ]; then
 	# public key, when the feed is signed
+	# Trust boundary: the key and the signed index come from the same source, so this is
+	# trust-on-first-use -- a compromised mirror can serve both. The fingerprint is printed
+	# below so it can be compared out of band.
 	if fetch "$feed_root/key-build.pub" /tmp/key-build.pub 2>/dev/null; then
+		keyfp=""
+		command -v sha256sum >/dev/null 2>&1 && keyfp="$(sha256sum /tmp/key-build.pub | awk '{print $1}')"
 		opkg-key add /tmp/key-build.pub 2>/dev/null || true
 		rm -f /tmp/key-build.pub
+		echo "Feed signing key added (sha256: ${keyfp:-unavailable})"
+		echo "  note: key and index share one source (TOFU); verify this fingerprint out of band."
 	fi
 	grep -q isongwrt /etc/opkg/customfeeds.conf 2>/dev/null && sed -i '/isongwrt/d' /etc/opkg/customfeeds.conf
 	echo "src/gz isongwrt $feed_url" >> /etc/opkg/customfeeds.conf
 	echo "Feed added: $feed_url"
 	opkg update
 else
+	# 25.12 / apk: the apk index is built without a signing key, so no public key is
+	# published in the feed. Keep the fetch for forward compatibility, and say so when
+	# it is absent -- an installed key that matches nothing would be misleading.
 	if fetch "$feed_root/public-key.pem" /etc/apk/keys/isongwrt.pem 2>/dev/null; then
 		echo "Installed feed public key /etc/apk/keys/isongwrt.pem"
+	else
+		echo "No feed public key published: the apk index is unsigned (packages.adb has no signature)."
 	fi
 	mkdir -p /etc/apk/repositories.d
 	grep -q isongwrt /etc/apk/repositories.d/customfeeds.list 2>/dev/null && sed -i '/isongwrt/d' /etc/apk/repositories.d/customfeeds.list
