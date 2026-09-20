@@ -302,8 +302,11 @@ install_binary() { # <src-binary>
 release_asset_sha256() { # <tag> <asset-name>
 	_tag="$1"; _want="$2"
 	_m=$(tmp_near "$CACHE_DIR/api-asset") || return 1
-	if ! dl_get "${GH_PROXY}https://api.github.com/repos/$GH_REPO/releases/tags/$_tag" "$_m" 25 2>/dev/null; then
-		rm -f "$_m"; return 1
+	# api.github.com is NOT handled by github.com acceleration prefixes (e.g. ghfast.top answers
+	# "403 Invalid input."), so query the API directly first and only fall back to the prefix.
+	if ! dl_get "https://api.github.com/repos/$GH_REPO/releases/tags/$_tag" "$_m" 25 2>/dev/null; then
+		dl_get "${GH_PROXY}https://api.github.com/repos/$GH_REPO/releases/tags/$_tag" "$_m" 25 2>/dev/null || {
+			rm -f "$_m"; return 1; }
 	fi
 	# No jq: flatten the JSON, one asset per line (a line ends at its browser_download_url), then take
 	# the digest that precedes that URL on the same line
