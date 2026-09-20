@@ -491,7 +491,9 @@ do_install_bg() { # <channel> [tag]
 	# busybox 无 nohup：子 shell 后台 + 重定向即可（无控制终端，父进程退出不影响）
 	( trap 'rm -f "$INSTALL_LOCK"' EXIT INT TERM; /usr/lib/isongwrt/ctl install "$_ch" "$_pin" ) >> "$INSTALL_LOG" 2>&1 &
 	_worker=$!
-	printf '%s\n' "$_worker" > "$INSTALL_LOCK"
+	# Only publish the worker pid while our claim still exists: a worker that already finished
+	# removed the lock, and recreating it here would leave a stale one behind.
+	[ -f "$INSTALL_LOCK" ] && printf '%s\n' "$_worker" > "$INSTALL_LOCK"
 	sleep 1
 	ok ",\"pid\":$(cat "$INSTALL_LOCK" 2>/dev/null || echo 0)"
 }
