@@ -185,6 +185,11 @@ is left untouched, and a boot-time network outage cannot lock you out because bo
 > real router, which exceeded the panel's XHR timeout and left the service unable to start
 > (`XHR request timed out`). Hence the current shape: probe, hard budget, and start/restart split.
 
+**Restart ordering (fixed 2026-09-26)**: `restart` = `stop` → wait for the old core → kill only *stray*
+cores (never the procd instance or its children) → `start` → post-check. Earlier the cleanup ran after
+`start` and killed the freshly started instance, which put procd into a crash loop and took the
+household offline twice. After any restart, verify with `ctl service verify --seconds 15`.
+
 ## Notes
 
 - Channel versions come from `releases.atom` (about 20 recent tags). For older

@@ -5,7 +5,9 @@
 #          本项目不编译内核（CI 只构建 LuCI 包）。
 # 用法：ctl <status|channels|releases|installed|install|rollback|remove|config-*|ruleset-prefetch|service> ...
 #       ruleset-prefetch [--confdir DIR]  重启前预取全部远端规则集（只读，可离线/生产试跑）
-#       service <start|restart> [--skip-prefetch]
+#       service <start|stop|restart|verify> [--skip-prefetch] [--verify-seconds N]
+#          restart/start 结束后会做强制存活后置检查（默认 +3s；计划内重启请用 15：
+#          `ctl service restart --verify-seconds 15` 或事后 `ctl service verify --seconds 15`）
 set -u
 
 APP=isongwrt
@@ -1213,6 +1215,100 @@ do_ruleset_prefetch() { # [--confdir DIR] [--quiet] [--probe-timeout S] [--budge
 	return 0
 }
 
+# ---------- 服务生命周期辅助（2026-09-26 事故修复：清理段自杀 → crash loop） ----------
+# 事故（两次造成生产断网，最近一次 21:08）：
+#   实测日志 `procd: Instance isongwrt::instance1 s in a crash loop 6 crashes, 6 seconds since last crash`，
+#   进程数 0、代理 204 → 000。根因：restart 路径的清理段在**新实例启动之后**执行
+#   `pgrep -f "$CORE_PATH run" | xargs kill` → 把 procd 刚拉起来的新实例也杀掉 → procd 判定崩溃并
+#   按 `respawn 3600 5 5` 重试 → 重试期间/耗尽后家庭网络失去代理。
+# 本文件现在的形态：
+#   ① 清理段只在 init.d **stop 之后、start 之前**执行 —— 新实例永远不会被清理段碰到；
+#   ② 双保险：kill 时排除**当前 procd 实例的 MainPID 及其子进程**（即使将来顺序被改坏也不会自杀）；
+#   ③ 只清"匹配 $CORE_PATH run 的游离进程"，被清 PID 记入日志与 JSON，事后可核对；
+#   ④ start/restart 之后做**强制存活后置检查**（+N 秒仍 running 且无新增 crash loop）。
+VERIFY_SECONDS=3            # 面板同步路径的默认后置检查秒数（门禁要求：计划内重启用 15）
+
+crashloop_count() { # 当前 logread 缓冲区里 isongwrt/sing-box 的 crash loop 行数（后置检查取"新增量"基线）
+	# 注意：`grep -c` 在 0 命中时**退出码非 0**，早期写法 `... | grep -c ... || echo 0` 会输出两行
+	# （"0\n0"），后面拿它做算术就会失败 —— 实测踩过。这里强制只回显一个数字。
+	_clc_n=$(logread 2>/dev/null | grep -iE 'crash loop' | grep -icE "$APP|sing-box" 2>/dev/null)
+	case "${_clc_n:-}" in ''|*[!0-9]*) _clc_n=0 ;; esac
+	printf '%s' "$_clc_n"
+}
+
+core_running() { pgrep -f "$CORE_PATH run" >/dev/null 2>&1; }
+
+# ★ 变量命名纪律：POSIX sh 的函数没有局部变量（`local` 不是 POSIX，虽然 ash/dash 支持），
+#   函数内部变量一律带**函数前缀**，绝不复用调用方的变量名 —— 实测踩过：
+#   `is_descendant_of` 内部用 `_p` 当游标，把 `kill_stray_cores` 的循环变量 `_p` 覆盖掉了，
+#   结果 `kill "$_p"` 变成了 `kill 1`（差点杀 init），而真正的游离进程根本没被清掉。
+procd_mainpid() { # 当前 procd 实例的 MainPID（取不到返回 1）——优先 ubus+jsonfilter，兜底 pid 文件
+	_pm_mp=""
+	if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+		_pm_mp=$(ubus call service list '{"name":"'"$APP"'","verbose":true}' 2>/dev/null \
+			| jsonfilter -e '@.'"$APP"'.instances[*].pid' 2>/dev/null | head -1)
+	fi
+	if [ -z "${_pm_mp:-}" ]; then
+		for _pm_f in "/var/run/$APP"/*.pid "/var/run/$APP.pid"; do
+			[ -f "$_pm_f" ] || continue
+			_pm_mp=$(head -1 "$_pm_f" 2>/dev/null | tr -d ' \t')
+			[ -n "${_pm_mp:-}" ] && break
+		done
+	fi
+	case "${_pm_mp:-}" in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s' "$_pm_mp"
+}
+
+ppid_of() { awk '{print $4}' "/proc/$1/stat" 2>/dev/null; }
+
+is_descendant_of() { # <pid> <ancestor>：沿 PPID 链上溯（最多 12 层）
+	_idp_p="$1"; _idp_a="$2"; _idp_n=0
+	while [ "$_idp_n" -lt 12 ]; do
+		case "${_idp_p:-}" in ''|0|1|*[!0-9]*) return 1 ;; esac
+		_idp_p=$(ppid_of "$_idp_p")
+		[ "$_idp_p" = "$_idp_a" ] && return 0
+		_idp_n=$((_idp_n + 1))
+	done
+	return 1
+}
+
+wait_core_gone() { # [秒]：等旧内核退出（有界）；0=已退出，1=仍在
+	_wcg_w="${1:-6}"; _wcg_j=0
+	while [ "$_wcg_j" -lt "$_wcg_w" ]; do
+		core_running || return 0
+		sleep 1; _wcg_j=$((_wcg_j + 1))
+	done
+	return 1
+}
+
+kill_stray_cores() { # 清游离的旧内核进程（排除 procd 实例 MainPID 及其子进程）；回显被清 PID 列表
+	_ks_mp=$(procd_mainpid 2>/dev/null); _ks_killed=""
+	for _ks_p in $(pgrep -f "$CORE_PATH run" 2>/dev/null); do
+		# 硬护栏：绝不碰 init、本进程、父进程，以及 procd 实例本体/其子进程
+		case "$_ks_p" in ''|*[!0-9]*) continue ;; esac
+		[ "$_ks_p" = 1 ] && continue
+		[ "$_ks_p" = "$$" ] && continue
+		[ -n "${PPID:-}" ] && [ "$_ks_p" = "$PPID" ] && continue
+		if [ -n "${_ks_mp:-}" ]; then
+			[ "$_ks_p" = "$_ks_mp" ] && continue              # procd 实例本体：绝不动
+			is_descendant_of "$_ks_p" "$_ks_mp" && continue   # 实例的子进程：绝不动
+		fi
+		kill "$_ks_p" 2>/dev/null && _ks_killed="$_ks_killed $_ks_p"
+	done
+	printf '%s' "$_ks_killed"
+}
+
+verify_service_alive() { # <秒> <crash 基线>：逐秒采样到 +<秒>；0=存活且无新增 crash loop，1=进程没了，2=出现新 crash loop
+	_vsa_s="$1"; _vsa_cb="$2"; _vsa_t=0
+	while :; do
+		core_running || return 1
+		_vsa_cn=$(crashloop_count)
+		[ "${_vsa_cn:-0}" -gt "${_vsa_cb:-0}" ] && return 2
+		[ "$_vsa_t" -ge "$_vsa_s" ] && return 0
+		sleep 1; _vsa_t=$((_vsa_t + 1))
+	done
+}
+
 case "${1:-status}" in
 	status)      do_status ;;
 	channels)    do_channels "${2:-}" ;;
@@ -1254,70 +1350,103 @@ case "${1:-status}" in
 	api-secret-new) do_api_secret_new ;;
 	check)       if _e=$(CONF_CHECK 2>&1); then ok; else die "$(printf '%s' "$_e" | tail -3 | tr '\n' ' ')"; fi ;;
 	log)         do_log "${2:-200}" ;;
-	service)     case "${2:-}" in
-			start|stop|restart)
-				# B2 v2：远端规则集**可达性探测**（廉价、有硬预算、绝不阻塞面板）。
-				#   restart：确认不可达 → 中止（保住正在工作的内核）
-				#   start  ：只告警、照常启动（本来就没有服务可保）
-				# 逃生门：--skip-prefetch / uci prefetch=0（默认 0）/ ISONGWRT_SKIP_PREFETCH=1
-				_skip_pf=0
-				for _a in ${3:-} ${4:-} ${5:-}; do
-					[ "$_a" = "--skip-prefetch" ] && _skip_pf=1
-				done
-				_pf_warn=""
-				if [ "$2" != "stop" ] && [ "$_skip_pf" = 0 ] && prefetch_enabled; then
-					if ! do_ruleset_prefetch --confdir "$CONF_DIR" --quiet; then
-						if [ "$2" = "restart" ]; then
-							printf '[ctl] rule-set probe failed: refusing to restart (the running core is left untouched)\n' >&2
-							logger -t isongwrt "rule-set probe failed: refusing to restart (running core untouched)" 2>/dev/null
-							exit 1
-						fi
-						# start：只告警，继续启动（没服务可保，规则集真不可达时 sing-box 自己会 FATAL）
-						_pf_warn="rule-set probe: some remote rule sets are unreachable (continuing anyway)"
-						printf '[ctl] %s\n' "$_pf_warn" >&2
-						logger -t isongwrt "$_pf_warn" 2>/dev/null
-					fi
-				fi
-				# 标记为手动启动（不受 UCI enabled=0 限制）
-				ISONGWRT_MANUAL_START=1 /etc/init.d/isongwrt "$2" >/dev/null 2>&1 || die "服务操作失败：$2"
-				if [ "$2" = "stop" ] || [ "$2" = "restart" ]; then
-					# procd 优雅退出最长 5s，等待进程真正结束再回报
-					_j=0
-					while [ "$_j" -lt 6 ] && pgrep -f "$CORE_PATH run" >/dev/null 2>&1; do
-						sleep 1; _j=$((_j + 1))
-					done
-					# OpenWrt's default busybox has no pkill: use pgrep + xargs -r kill as the hard-stop fallback
-					pgrep -f "$CORE_PATH run" 2>/dev/null | xargs -r kill 2>/dev/null
-				fi
-				case "$2" in
-					start|restart)
-						# 规则集/面板资源可能需要下载，最多等 8 秒
-						_i=0
-						while [ "$_i" -lt 4 ]; do
-							pgrep -f "$CORE_PATH run" >/dev/null 2>&1 && break
-							sleep 2; _i=$((_i + 1))
-						done
-						if ! pgrep -f "$CORE_PATH run" >/dev/null 2>&1; then
-							# 只取真正的失败原因：优先 FATAL/ERROR，跳过 INFO 噪音
-							_err=$(logread 2>/dev/null | grep -iE 'sing-box\[[0-9]+\]' | grep -iE 'FATAL|ERROR' | tail -2 | sed 's/.*sing-box\[[0-9]*\]: //' | tr '\n' ' ')
-							_hint=""
-							if printf '%s' "$_err" | grep -qiE 'address already in use|bind:'; then
-								_hint="（端口被占用：请到「面板」页改用其它 API 端口，并检查入站端口是否与 mihomo 等冲突）"
-							elif printf '%s' "$_err" | grep -qiE 'download|http2|rule.?set'; then
-								_hint="（疑似远端规则集下载失败：可在「配置管理」点「规则集走代理」为 rule_set 指定下载走代理）"
-							fi
-							[ -n "$_err" ] || _err="未发现 FATAL/ERROR 日志；请检查「开机自启」是否关闭、配置是否为空、内核是否已安装"
-							die "服务未能启动：${_err}${_hint}"
-						fi ;;
-				esac
-				if [ -n "$_pf_warn" ]; then
-					ok ",\"action\":\"$2\",\"warnings\":[\"$(json_esc "$_pf_warn")\"]"
-				else
-					ok ",\"action\":\"$2\""
-				fi ;;
+	service)     _svc="${2:-}"; shift 2 2>/dev/null || true
+	             _skip_pf=0; _vsec="$VERIFY_SECONDS"
+	             while [ $# -gt 0 ]; do
+	                 case "$1" in
+	                     --skip-prefetch)  _skip_pf=1 ;;
+	                     --verify-seconds)
+	                         # 带值选项必须 shift 两次（早期写法只 shift 一次 → 值会被当成未知参数：
+	                         # "service: unknown option 5" —— 实测踩过，与 --budget 那次同类）
+	                         _vsec="${2:-$VERIFY_SECONDS}"; shift ;;
+	                     *) die "service: unknown option $1" ;;
+	                 esac
+	                 shift
+	             done
+	             case "$_vsec" in ''|*[!0-9]*) _vsec="$VERIFY_SECONDS" ;; esac
+	             [ "$_vsec" -gt 60 ] 2>/dev/null && _vsec=60
 
-			enable|disable) /etc/init.d/isongwrt "$2" >/dev/null 2>&1 && ok || die "服务操作失败：$2" ;;
-			*) die "service 需要 start|stop|restart|enable|disable" ;;
-		esac ;;
+	             case "$_svc" in
+	             enable|disable) /etc/init.d/isongwrt "$_svc" >/dev/null 2>&1 && ok || die "服务操作失败：$_svc" ;;
+
+	             verify)
+	                 # 强制后置检查（门禁 §10.1 用）：只读观测，不动服务
+	                 _cb=$(crashloop_count)
+	                 core_running || die "服务未在运行（进程数 0）"
+	                 verify_service_alive "$_vsec" "$_cb"; _vr=$?
+	                 [ "$_vr" = 0 ] && ok ",\"alive\":true,\"checked_s\":$_vsec" \
+	                     || die "服务存活后置检查失败（+${_vsec}s 内$([ "$_vr" = 2 ] && echo '出现 crash loop' || echo '进程消失')）" ;;
+
+	             start|stop|restart)
+	                 # ① B2 v2 远端规则集**可达性探测**（廉价、有硬预算）——语义保持不变
+	                 #    restart：确认不可达 → 中止（保住正在工作的内核）；start：只告警、照常启动
+	                 #    逃生门：--skip-prefetch / uci prefetch=0（默认 0）/ ISONGWRT_SKIP_PREFETCH=1
+	                 _pf_warn=""
+	                 if [ "$_svc" != "stop" ] && [ "$_skip_pf" = 0 ] && prefetch_enabled; then
+	                     if ! do_ruleset_prefetch --confdir "$CONF_DIR" --quiet; then
+	                         if [ "$_svc" = "restart" ]; then
+	                             printf '[ctl] rule-set probe failed: refusing to restart (the running core is left untouched)\n' >&2
+	                             logger -t isongwrt "rule-set probe failed: refusing to restart (running core untouched)" 2>/dev/null
+	                             exit 1
+	                         fi
+	                         _pf_warn="rule-set probe: some remote rule sets are unreachable (continuing anyway)"
+	                         printf '[ctl] %s\n' "$_pf_warn" >&2
+	                         logger -t isongwrt "$_pf_warn" 2>/dev/null
+	                     fi
+	                 fi
+
+	                 _cb=$(crashloop_count)          # crash loop 基线：后置检查只认"新增量"
+	                 _cleaned=""
+
+	                 # ② stop 阶段（含清理段）——★ 清理必须在 start **之前**，否则会杀掉新实例
+	                 if [ "$_svc" = "stop" ] || [ "$_svc" = "restart" ]; then
+	                     ISONGWRT_MANUAL_START=1 /etc/init.d/isongwrt stop >/dev/null 2>&1 || die "服务操作失败：stop"
+	                     # procd 优雅退出最长 5s；超时后再兜底清游离进程（排除 procd 实例本身及其子进程）
+	                     wait_core_gone 6 || true
+	                     _cleaned=$(kill_stray_cores)
+	                     if [ -n "$_cleaned" ]; then
+	                         logger -t isongwrt "cleaned stray core process(es):$_cleaned" 2>/dev/null
+	                     fi
+	                 fi
+
+	                 # ③ start 阶段
+	                 if [ "$_svc" = "start" ] || [ "$_svc" = "restart" ]; then
+	                     ISONGWRT_MANUAL_START=1 /etc/init.d/isongwrt start >/dev/null 2>&1 || die "服务操作失败：start"
+	                     # 规则集/面板资源可能需要下载，最多等 8 秒
+	                     _i=0
+	                     while [ "$_i" -lt 4 ]; do
+	                         core_running && break
+	                         sleep 2; _i=$((_i + 1))
+	                     done
+	                     if ! core_running; then
+	                         # 只取真正的失败原因：优先 FATAL/ERROR，跳过 INFO 噪音
+	                         _err=$(logread 2>/dev/null | grep -iE 'sing-box\[[0-9]+\]' | grep -iE 'FATAL|ERROR' | tail -2 | sed 's/.*sing-box\[[0-9]*\]: //' | tr '\n' ' ')
+	                         _hint=""
+	                         if printf '%s' "$_err" | grep -qiE 'address already in use|bind:'; then
+	                             _hint="（端口被占用：请到「面板」页改用其它 API 端口，并检查入站端口是否与 mihomo 等冲突）"
+	                         elif printf '%s' "$_err" | grep -qiE 'download|http2|rule.?set'; then
+	                             _hint="（疑似远端规则集下载失败：可在「配置管理」点「规则集走代理」为 rule_set 指定下载走代理）"
+	                         fi
+	                         [ -n "$_err" ] || _err="未发现 FATAL/ERROR 日志；请检查「开机自启」是否关闭、配置是否为空、内核是否已安装"
+	                         die "服务未能启动：${_err}${_hint}"
+	                     fi
+	                     # ★ 强制后置检查：+N 秒仍存活、且没有**新增**的 crash loop（门禁 §10.1）
+	                     verify_service_alive "$_vsec" "$_cb"; _vr=$?
+	                     if [ "$_vr" != 0 ]; then
+	                         _newcl=$(( $(crashloop_count) - _cb ))
+	                         if [ "$_vr" = 2 ]; then
+	                             die "服务启动后进入 crash loop（+${_vsec}s 内新增 ${_newcl} 条 crash loop 日志）——请检查端口占用与规则集下载"
+	                         fi
+	                         die "服务启动后在 +${_vsec}s 内退出（请查看「日志」页）"
+	                     fi
+	                 fi
+
+	                 _extra=""
+	                 [ -n "$_cleaned" ] && _extra="$_extra,\"cleaned\":$(printf '%s' "$_cleaned" | wc -w | tr -d ' ')"
+	                 [ -n "$_pf_warn" ] && _extra="$_extra,\"warnings\":[\"$(json_esc "$_pf_warn")\"]"
+	                 ok ",\"action\":\"$_svc\",\"verified_s\":$_vsec$_extra" ;;
+
+	             *) die "service 需要 start|stop|restart|verify|enable|disable" ;;
+	             esac ;;
 	*) die "未知命令：${1:-}" ;;
 esac

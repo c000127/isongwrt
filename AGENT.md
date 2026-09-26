@@ -156,9 +156,28 @@ Deliberate details: **boot is unaffected** (rc.common calls the init script dire
 `ctl ruleset-prefetch [--confdir DIR]` is runnable on its own — read-only, only temp files, which is
 how it is verified offline and against production.
 
-**Not fixed here (separate decision):** the pre-existing quirk where `ctl service restart`'s cleanup
-section can kill the core it has just started (procd's `respawn 3600 5 5` brings it back ~5s later).
-Measured before/after B2: identical (A/B on a stub harness), so it is not introduced by this feature.
+### 2.6 Service restart ordering (fixed 2026-09-26 — it caused two outages)
+
+```
+ctl service start|restart
+  restart:  probe (if enabled) → init.d stop → wait for the old core to exit (≤6s)
+            → kill STRAY cores (never the procd instance) → init.d start → wait ≤8s
+            → mandatory post-check: +N seconds still running and no NEW "crash loop" lines
+  start:    probe (warn only) → init.d start → wait → post-check
+  stop:     init.d stop → wait → kill stray cores
+```
+
+Why the order matters: the cleanup used to run **after** start, so `pgrep -f "$CORE_PATH run" | xargs kill`
+killed the instance procd had just launched → procd logged
+`Instance isongwrt::instance1 s in a crash loop …` and entered the respawn loop (household had no proxy).
+
+Double insurance: strays are killed only if they are neither the current procd MainPID (from
+`ubus call service list`, pid-file fallback) nor a descendant of it; PID 1, `$$` and `$PPID` are always
+skipped. Cleaned PIDs are logged and reported in the JSON (`"cleaned":N`).
+
+Post-check: `--verify-seconds N` (default 3s for the panel path, capped at 60) and
+`ctl service verify --seconds 15` (read-only, for the gate's acceptance step). It fails the request
+if the core disappears or if the number of `crash loop` log lines grows.
 ### 3.3 Known gaps (explicit "do / don't")
 
 | # | Gap | Impact | Plan |
@@ -356,3 +375,12 @@ sh feed.sh                                        # add/refresh the package feed
 15. **busybox awk: save `RLENGTH` immediately.** A second `match()` overwrites `RSTART`/`RLENGTH`,
     which silently produced an infinite loop in the rule-set URL scanner (it looked like a hang).
     The scanner now also breaks out when a scan pass made no progress.
+
+16. **POSIX sh functions have no locals.** A helper that reuses a generic variable name (`_p`, `_n`, `_j`)
+    silently clobbers the caller's loop variable: `is_descendant_of` used `_p` for its cursor and turned
+    `kill "$_p"` in the caller into `kill 1`. Prefix every function-internal variable with the function
+    name (or declare `local`, accepting that it is a non-POSIX extension).
+17. **`grep -c` exits non-zero when it counts 0**, so `... | grep -c x || echo 0` prints two lines
+    ("0\n0") and the next arithmetic test fails. Capture into a variable and normalise it.
+18. **Options that take a value need two `shift`s** in a hand-written `while [ $# -gt 0 ]` parser;
+    with one `shift` the value is re-read as an option (`unknown option 5`).
