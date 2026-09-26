@@ -1014,27 +1014,85 @@ do_channels() {
 	printf ']}\n'
 }
 
-# ---------- B2：重启前预取远端规则集（方案 A，2026-09-26） ----------
-# 动机（实测，homobox reports/singbox-config-audit-20260926.md F1）：只要有一条远端规则集在启动时
-# 拉不到，sing-box 就 FATAL 起不来，**热缓存也不兜底**（冷启动 1.91s / 热 0.04s，但 1 条不可达照挂）。
-# 后果：节点故障 / GitHub 限流期间重启 = 直接失去代理。因此在**面板触发的** start/restart 前先把
-# 全部远端规则集抓一遍：全部成功才继续；任一失败 → 不重启 + 非 0 + JSON 错误（列出失败 URL），
-# 当前运行内核保持不动。
+# ---------- B2 v2：远端规则集「廉价可达性探测」（2026-09-26 重做，前身造成生产事故） ----------
+# 价值（不变）：只要有一条远端规则集在启动时拉不到，sing-box 就 FATAL 起不来，**热缓存也不兜底**，
+# 所以"节点故障期间重启"本应被拦下。
 #
-# 逃生门（任一命中即跳过预取，行为与改造前逐字等价）：
+# ★ v1 的事故（2026-09-26 20:17，必须记住）：v1 对 18 条远端规则集做**全量下载**（每条最多 25s、
+#   串行、失败还走 github_proxy 再试一遍），生产实测 **51 秒**；它挂在 ctl 的**同步路径**上
+#   → 远超面板 XHR 超时 → 启动请求被浏览器中断、更新检查与日志页全部 `XHR request timed out`，
+#   服务一直起不来（最后靠绕过 ctl 的 `/etc/init.d/isongwrt start` + `uci prefetch=0` 恢复）。
+#   ⇒ 教训写进 docs/STATUS.md §10.1 的"ctl 同步路径耗时预算"条款：**同步路径上的操作最坏耗时
+#     必须远小于面板 XHR 超时**，超时就等于"面板变砖"。
+#
+# ★ v2 原则：
+#   1. **只探测、不下载**：HEAD 优先，HEAD 不被支持时退化为 `range 0-0` 的 1 字节 GET；绝不取正文。
+#   2. **三重时间上限**：单条 `PROBE_TIMEOUT`（默认 4s）／总预算 `PREFETCH_BUDGET`（默认 12s）／
+#      批量并发 `PREFETCH_PARALLEL`（默认 8）。最坏墙钟 ≈ ceil(N/并发) × 单条超时，并被总预算截断。
+#   3. **预算耗尽 ≠ 失败**：没来得及探测的条目记为 `unprobed`，只告警、**不阻塞**（绝不把面板拖死）。
+#   4. **语义分离**：`restart` 探测到*确认不可达* → 中止（保住正在工作的内核）；
+#      `start` 无论结果如何都只告警、照常启动（本来就没有服务可保，规则集真不可达时 sing-box
+#      自己会 FATAL，不需要 ctl 再挡一层）。
+#   5. **默认关闭**：`isongwrt.main.prefetch` 默认 0（与 /etc/config/isongwrt 的默认值一致）。
+#
+# 逃生门（任一命中即整段跳过，行为与改造前逐字等价）：
 #   * 参数：`ctl service <start|restart> --skip-prefetch`
-#   * uci ：`isongwrt.main.prefetch='0'`（默认 1）
+#   * uci ：`isongwrt.main.prefetch='0'`（**默认值就是 0**）
 #   * 环境：`ISONGWRT_SKIP_PREFETCH=1`
 #
-# ★ 开机自启**不受影响**：rc.common 直接走 init.d 的 start_service，不经过 ctl，
-#   所以"开机时 WAN 还没起来"不会因预取失败而锁死服务；只有面板按钮这条路被门禁化。
+# ★ 开机自启**不受影响**：rc.common 直接走 init.d 的 start_service，不经过 ctl。
 #
-# busybox 兼容：只用 awk/sed/grep/wc/mktemp/rm，不用 python3、pgrep -c、timeout、paste、fold。
-# 下载复用 dl_get（curl → uclient-fetch → wget 兜底），超时由 dl_get 传给底层命令。
+# busybox 兼容：只用 awk/sed/grep/date/mktemp/rm + curl|uclient-fetch|wget，不用 python3、
+# pgrep -c、timeout、paste、fold。并发用"分批 + wait"，不依赖 `xargs -P` 或 `jobs -p`。
+
+PREFETCH_PARALLEL=8          # 每批并发探测条数
+PREFETCH_BUDGET=12           # 总预算（秒）：到点即停止探测，剩余记为 unprobed
+PROBE_TIMEOUT=4              # 单条探测超时（秒）
 
 prefetch_enabled() {
 	[ "${ISONGWRT_SKIP_PREFETCH:-0}" = "1" ] && return 1
-	[ "$(cfgd prefetch 1)" = "1" ] || return 1
+	[ "$(cfgd prefetch 0)" = "1" ] || return 1
+	return 0
+}
+
+probe_head() { # <url>：HEAD 探测；回显 0=可达 / 28=超时 / 其它非 0=错误（供调用方决定是否降级）
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSIL --max-time "$PROBE_TIMEOUT" -o /dev/null -H "User-Agent: $UA" "$1" 2>/dev/null
+		return $?
+	fi
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -T "$PROBE_TIMEOUT" -O /dev/null "$1" 2>/dev/null
+		return $?
+	fi
+	if command -v wget >/dev/null 2>&1; then
+		wget -q -T "$PROBE_TIMEOUT" -O /dev/null "$1" 2>/dev/null
+		return $?
+	fi
+	return 127
+}
+
+probe_url() { # <url> <result-file>：廉价探测单条 URL（**单条总耗时上限 = PROBE_TIMEOUT**）
+	_pu="$1"; _po="$2"; _pok=0
+	probe_head "$_pu"; _rc=$?
+	if [ "$_rc" = 0 ]; then
+		_pok=1
+	elif [ "$_rc" = 28 ]; then
+		# 超时 = 不可达：**不再补一次 range 探测**（超时本身就说明问题，补测只会把耗时翻倍 —— 实测踩过）
+		_pok=0
+	else
+		# 非超时错误（如 405/501：部分 CDN/对象存储不支持 HEAD）→ 退化为 range 0-0，只取 1 字节
+		if command -v curl >/dev/null 2>&1; then
+			curl -fsSL -r 0-0 --max-time "$PROBE_TIMEOUT" -o /dev/null -H "User-Agent: $UA" "$_pu" 2>/dev/null && _pok=1
+		fi
+	fi
+	# 直连失败且配置了 github_proxy 时，用同一套廉价探测走加速前缀再试一次（仅 GitHub 域名，同样只发 HEAD）
+	if [ "$_pok" = 0 ] && [ "$_rc" != 28 ] && [ -n "$GH_PROXY" ]; then
+		case "$_pu" in
+			https://github.com/*|https://api.github.com/*|https://raw.githubusercontent.com/*)
+				probe_head "${GH_PROXY}${_pu}" && _pok=1 ;;
+		esac
+	fi
+	if [ "$_pok" = 1 ]; then printf 'ok\n' > "$_po"; else printf 'fail\n' > "$_po"; fi
 	return 0
 }
 
@@ -1073,59 +1131,85 @@ collect_remote_urls() { # <file>：按 token 顺序扫描，取 type=="remote" �
 	}' "$1" 2>/dev/null
 }
 
-do_ruleset_prefetch() { # [--confdir DIR] [--quiet]：全成功返回 0；任一失败打印 JSON 错误并返回 1
+do_ruleset_prefetch() { # [--confdir DIR] [--quiet] [--probe-timeout S] [--budget S] [--parallel N]
+	# 返回 0 = 没有"确认不可达"的条目（可能带 unprobed 告警）；1 = 有确认不可达（调用方按 start/restart 决定是否中止）
 	_pd="$CONF_DIR"; _quiet=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
-			--confdir) _pd="${2:-$CONF_DIR}" ;;
-			--quiet)   _quiet=1 ;;
-			--*)       die "ruleset-prefetch: unknown option $1" ;;
+			--confdir)       _pd="${2:-$CONF_DIR}" ;;
+			--quiet)         _quiet=1 ;;
+			--probe-timeout) PROBE_TIMEOUT="${2:-$PROBE_TIMEOUT}" ;;
+			--budget)        PREFETCH_BUDGET="${2:-$PREFETCH_BUDGET}" ;;
+			--parallel)      PREFETCH_PARALLEL="${2:-$PREFETCH_PARALLEL}" ;;
+			--*)             die "ruleset-prefetch: unknown option $1" ;;
 		esac
 		shift
 	done
 	[ -d "$_pd" ] || die "ruleset-prefetch: config directory not found: $_pd"
-	# 临时目录固定在 /tmp 并用 mktemp：预取是只读操作，不创建/修改任何持久状态（生产可安全试跑）
+	# 只写 /tmp 临时文件、只做探测：不创建/修改任何持久状态（所以生产可安全试跑）
 	_tmpd=$(mktemp -d /tmp/isongwrt-prefetch.XXXXXX 2>/dev/null) || _tmpd="/tmp/isongwrt-prefetch.$$"
 	[ -L "$_tmpd" ] && die "ruleset-prefetch: refusing to use a symlink as temp dir: $_tmpd"
 	mkdir -p "$_tmpd" 2>/dev/null || die "ruleset-prefetch: cannot create temp dir: $_tmpd"
-	_total=0; _okn=0; _bytes=0; _failed=""
+
+	# 1) 收集 URL（保持出现顺序，便于报告）
+	_i=0
 	for _cf in "$_pd"/*.json; do
 		[ -f "$_cf" ] || continue
 		for _u in $(collect_remote_urls "$_cf"); do
-			_total=$((_total + 1))
-			_out="$_tmpd/rs.$_total"
-			_okd=0
-			if dl_get "$_u" "$_out" 25 && [ -s "$_out" ]; then
-				_okd=1
-			elif [ -n "$GH_PROXY" ]; then
-				# 直连失败时经 github_proxy 前缀重试（与 fetch_releases_atom/rest 的既有写法一致；
-				# 生产 uci 已把该选项设为 ghfast.top）
-				case "$_u" in
-					https://github.com/*|https://api.github.com/*|https://raw.githubusercontent.com/*)
-						dl_get "${GH_PROXY}${_u}" "$_out" 25 && [ -s "$_out" ] && _okd=1 ;;
-				esac
-			fi
-			if [ "$_okd" = 1 ]; then
-				_okn=$((_okn + 1))
-				_b=$(wc -c < "$_out" 2>/dev/null | tr -d ' ')
-				[ -n "${_b:-}" ] || _b=0
-				_bytes=$((_bytes + _b))
-			else
-				_failed="$_failed $_u"
-			fi
+			_i=$((_i + 1))
+			printf '%s\n' "$_u" > "$_tmpd/u.$_i"
 		done
 	done
+	_total="$_i"
+
+	# 2) 分批并发探测；每批前检查总预算（到点即停，剩余记 unprobed —— 绝不把面板拖死）
+	# 每次发起探测前都算一次"还剩多少预算"：连"发起"都会被挡住，最坏耗时 ≈ 预算本身
+	# （只在每批之前检查的话，一批最长可拖 PROBE_TIMEOUT，会越过预算 —— 实测 18 条黑洞 16.1s > 12s 预算）
+	_t0=$(date +%s)
+	_running=0; _launched=0; _budget_hit=0
+	while [ "$_launched" -lt "$_total" ]; do
+		_el=$(( $(date +%s) - _t0 ))
+		if [ $((_el + PROBE_TIMEOUT)) -gt "$PREFETCH_BUDGET" ]; then _budget_hit=1; break; fi
+		_launched=$((_launched + 1))
+		probe_url "$(cat "$_tmpd/u.$_launched")" "$_tmpd/r.$_launched" &
+		_running=$((_running + 1))
+		if [ "$_running" -ge "$PREFETCH_PARALLEL" ]; then wait; _running=0; fi
+	done
+	wait
+
+	# 3) 汇总
+	_ok=0; _bad=""; _unprobed=""
+	_k=0
+	while [ "$_k" -lt "$_total" ]; do
+		_k=$((_k + 1))
+		_u=$(cat "$_tmpd/u.$_k" 2>/dev/null)
+		[ -n "${_u:-}" ] || continue
+		if [ ! -f "$_tmpd/r.$_k" ]; then
+			_unprobed="${_unprobed}${_unprobed:+,}\"$(json_esc "$_u")\""
+		elif [ "$(cat "$_tmpd/r.$_k")" = "ok" ]; then
+			_ok=$((_ok + 1))
+		else
+			_bad="${_bad}${_bad:+,}\"$(json_esc "$_u")\""
+		fi
+	done
+	_el=$(( $(date +%s) - _t0 ))
+	_un=0; [ -n "$_unprobed" ] && _un=1
 	rm -rf "$_tmpd" 2>/dev/null
-	if [ -n "$_failed" ]; then
-		_fj=""
-		for _u in $_failed; do
-			_fj="${_fj}${_fj:+,}\"$(json_esc "$_u")\""
-		done
-		printf '{"ok":false,"error":"rule-set prefetch failed: %s of %s unreachable","failed":[%s],"prefetched":%s,"total":%s}\n' \
-			"$(( _total - _okn ))" "$_total" "$_fj" "$_okn" "$_total" >&2
+
+	_summary="\"probe\":{\"total\":$_total,\"reachable\":$_ok,\"elapsed_s\":$_el,\"budget_s\":$PREFETCH_BUDGET}"
+	if [ -n "$_bad" ]; then
+		printf '{"ok":false,"error":"rule-set probe: %s of %s unreachable (probe budget %ss, elapsed %ss)","unreachable":[%s],"unprobed":[%s],"reachable":%s,"total":%s,"elapsed_s":%s}\n' \
+			"$(( _total - _ok ))" "$_total" "$PREFETCH_BUDGET" "$_el" "$_bad" "$_unprobed" "$_ok" "$_total" "$_el" >&2
 		return 1
 	fi
-	[ "$_quiet" = 1 ] || ok ",\"prefetched\":$_okn,\"total\":$_total,\"bytes\":$_bytes"
+	if [ "$_un" = 1 ]; then
+		# 预算内没测完：只告警（返回 0），调用方按 start/restart 决定是"照常"还是"照样中止"
+		printf '[ctl] notice: rule-set probe incomplete (budget %ss, elapsed %ss): not probed: %s\n' \
+			"$PREFETCH_BUDGET" "$_el" "$_unprobed" >&2
+		[ "$_quiet" = 1 ] || ok ",\"notice\":\"rule-set probe incomplete\",$_summary,\"unprobed\":[$_unprobed]"
+		return 0
+	fi
+	[ "$_quiet" = 1 ] || ok ",$_summary"
 	return 0
 }
 
@@ -1150,7 +1234,9 @@ case "${1:-status}" in
 	rollback)    do_rollback ;;
 	remove)      _v="${2:-}"; require_version "$_v"; do_remove "$_v" "${3:-}" ;;
 	config-list)    do_config_list ;;
-	ruleset-prefetch) do_ruleset_prefetch "${2:-}" "${3:-}" ;;
+	# 注意：必须把**全部**剩余参数透传（早期写法只传 $2/$3，导致 --budget/--parallel/--probe-timeout
+	# 被静默丢弃 —— 实测发现，测试时表现为"参数不生效"）
+	ruleset-prefetch) shift; do_ruleset_prefetch "$@" ;;
 	config-get)     _n="${2:-}"; [ -n "$_n" ] || die "config-get requires a config name"; do_config_get "$_n" ;;
 	config-save)    _n="${2:-}"; [ -n "$_n" ] || die "config-save requires a config name"; do_config_save "$_n" "${3:-}" ;;
 	config-restore) _n="${2:-}"; [ -n "$_n" ] || die "config-restore requires a backup file name"; do_config_restore "$_n" ;;
@@ -1170,16 +1256,26 @@ case "${1:-status}" in
 	log)         do_log "${2:-200}" ;;
 	service)     case "${2:-}" in
 			start|stop|restart)
-				# B2：面板触发的启动/重启前先预取全部远端规则集；失败则中止且不动当前运行内核。
-				# 逃生门：--skip-prefetch / uci prefetch=0 / ISONGWRT_SKIP_PREFETCH=1（三者任一即跳过）。
+				# B2 v2：远端规则集**可达性探测**（廉价、有硬预算、绝不阻塞面板）。
+				#   restart：确认不可达 → 中止（保住正在工作的内核）
+				#   start  ：只告警、照常启动（本来就没有服务可保）
+				# 逃生门：--skip-prefetch / uci prefetch=0（默认 0）/ ISONGWRT_SKIP_PREFETCH=1
 				_skip_pf=0
 				for _a in ${3:-} ${4:-} ${5:-}; do
 					[ "$_a" = "--skip-prefetch" ] && _skip_pf=1
 				done
+				_pf_warn=""
 				if [ "$2" != "stop" ] && [ "$_skip_pf" = 0 ] && prefetch_enabled; then
 					if ! do_ruleset_prefetch --confdir "$CONF_DIR" --quiet; then
-						printf '[ctl] prefetch failed: refusing to %s (the running core is left untouched)\n' "$2" >&2
-						exit 1
+						if [ "$2" = "restart" ]; then
+							printf '[ctl] rule-set probe failed: refusing to restart (the running core is left untouched)\n' >&2
+							logger -t isongwrt "rule-set probe failed: refusing to restart (running core untouched)" 2>/dev/null
+							exit 1
+						fi
+						# start：只告警，继续启动（没服务可保，规则集真不可达时 sing-box 自己会 FATAL）
+						_pf_warn="rule-set probe: some remote rule sets are unreachable (continuing anyway)"
+						printf '[ctl] %s\n' "$_pf_warn" >&2
+						logger -t isongwrt "$_pf_warn" 2>/dev/null
 					fi
 				fi
 				# 标记为手动启动（不受 UCI enabled=0 限制）
@@ -1214,7 +1310,12 @@ case "${1:-status}" in
 							die "服务未能启动：${_err}${_hint}"
 						fi ;;
 				esac
-				ok ",\"action\":\"$2\"" ;;
+				if [ -n "$_pf_warn" ]; then
+					ok ",\"action\":\"$2\",\"warnings\":[\"$(json_esc "$_pf_warn")\"]"
+				else
+					ok ",\"action\":\"$2\""
+				fi ;;
+
 			enable|disable) /etc/init.d/isongwrt "$2" >/dev/null 2>&1 && ok || die "服务操作失败：$2" ;;
 			*) die "service 需要 start|stop|restart|enable|disable" ;;
 		esac ;;

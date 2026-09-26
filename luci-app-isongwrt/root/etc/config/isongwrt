@@ -18,6 +18,12 @@ config isongwrt 'main'
 	option dashboard '1'
 	# 面板资源下载地址（留空 = 官方默认 gh-pages zip；CN 可填镜像）
 	option dashboard_download_url ''
+	# 重启前对远端规则集做**廉价可达性探测**（HEAD；单条 4s、总预算 12s、并发 8）：
+	#   restart 探测到不可达 → 中止重启（保住正在工作的内核）；start 只告警、照常启动。
+	# 默认 '0'（关闭）—— 2026-09-26 的 v1（全量下载、无预算）曾把面板 XHR 拖超时并造成启动失败；
+	#   是否启用请先按实测耗时决定（见 README「Restart-time prefetch」与同目录下 homobox 的报告）。
+	#   逃生门：`ctl service start|restart --skip-prefetch` / 本选项置 0 / ISONGWRT_SKIP_PREFETCH=1。
+	option prefetch '0'
 	# Only the native sing-box API service above is supported; the former
 	# clash_api / clash_port / clash_secret keys are deleted by
 	# /etc/uci-defaults/99-isongwrt on upgrade.

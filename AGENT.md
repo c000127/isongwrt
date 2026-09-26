@@ -123,30 +123,42 @@ update interval) · `CI ↔ release assets` (names, checksums, feed index).
 | **L3 evolvable** | Channels (stable/rc/beta/alpha) + rollback + feed for unattended updates | ✅ |
 | **L4 self-checking** | Device-level smoke test in CI; drift detection between docs and implementation; signed apk feed | ⏳ not done |
 
-### 2.5 Restart-time rule-set prefetch (B2)
+### 2.5 Restart-time rule-set reachability probe (B2)
 
 ```
 ctl service start|restart            (the panel buttons — nothing else)
-  └─ 1) ruleset-prefetch: read every route.rule_set[].type=="remote" url from the conf dir,
-        fetch each one to a temp file, require non-empty
-           all good  → continue with the restart
-           any fail  → ABORT: exit≠0, JSON error listing the failed URLs,
-                       the currently running core is left untouched
-  └─ 2) escape hatches (any one skips step 1, byte-for-byte the old behaviour):
-           ctl service restart --skip-prefetch
-           uci set isongwrt.main.prefetch=0        (default 1)
+  └─ 1) ruleset-prefetch: read every route.rule_set[].type=="remote" url from the conf dir and
+        *probe* it — HEAD (range 0-0 only as a fallback when HEAD is not supported). Never the body.
+        Bounds: PROBE_TIMEOUT 4s per URL · PREFETCH_BUDGET 12s total · PREFETCH_PARALLEL 8
+           all reachable            → continue
+           confirmed unreachable    → restart: ABORT (exit≠0, JSON lists the URLs, running core untouched)
+                                      start:   WARN and continue (there is nothing to protect)
+           budget exhausted         → the unprobed remainder is reported as `unprobed` and NEVER blocks
+  └─ 2) escape hatches (any one skips step 1 entirely, byte-for-byte the old behaviour):
+           ctl service start|restart --skip-prefetch
+           uci set isongwrt.main.prefetch=0        (this is the DEFAULT; code and /etc/config agree)
            ISONGWRT_SKIP_PREFETCH=1 ctl service restart
 ```
 
-Why it exists: **one unreachable remote rule set is fatal at startup and the warm cache does not
-save you**, so a restart during a node outage would take the proxy down for as long as the outage
-lasts (measured; see the homobox audit report F1). Prefetch turns that into "refuse to restart".
+Why it exists: **one unreachable remote rule set is fatal at startup and the warm cache does not save
+you**, so a restart during a node outage should be refused rather than executed.
 
-Deliberate detail: **boot is unaffected** — rc.common calls `start_service` in the init script
-directly, so a cold boot with no WAN yet cannot be locked out by a failing prefetch. Only the
-panel path is gated. `ctl ruleset-prefetch [--confdir DIR]` is also runnable on its own and is
-read-only (it only writes temp files): that is how it is verified offline and against production.
+**The v1 incident (2026-09-26 20:17) — keep this in mind before touching the synchronous path.**
+v1 *downloaded* every remote rule set (25s per URL, serially, plus a proxy retry) and sat on `ctl`'s
+synchronous path. On production that took **51s**, far beyond the panel's XHR timeout: the start
+request was aborted by the browser, the core never came up, and the update check and log pages showed
+`XHR request timed out`. Recovery was bypassing ctl (`/etc/init.d/isongwrt start`) and setting
+`prefetch=0`. Fix (v2): probe instead of download, hard-bound the time, and split start from restart.
+⇒ Rule now enforced in the project gate: **any operation on ctl's synchronous path must have a
+worst-case duration far below the panel XHR timeout** (see the other repo's `docs/STATUS.md` §10.1).
 
+Deliberate details: **boot is unaffected** (rc.common calls the init script directly, never ctl), and
+`ctl ruleset-prefetch [--confdir DIR]` is runnable on its own — read-only, only temp files, which is
+how it is verified offline and against production.
+
+**Not fixed here (separate decision):** the pre-existing quirk where `ctl service restart`'s cleanup
+section can kill the core it has just started (procd's `respawn 3600 5 5` brings it back ~5s later).
+Measured before/after B2: identical (A/B on a stub harness), so it is not introduced by this feature.
 ### 3.3 Known gaps (explicit "do / don't")
 
 | # | Gap | Impact | Plan |

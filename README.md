@@ -174,11 +174,16 @@ release binary (ss2022, no TLS). See [server/README.md](server/README.md).
 from the public echs-top lists and published by [.github/workflows/rules-echs.yml](.github/workflows/rules-echs.yml)
 (daily + manual, guardrailed, with `rules/manifest-echs.json` as provenance).
 
-**Restart-time prefetch**: `ctl service start|restart` (the panel buttons) first fetches every
-`route.rule_set[].type=="remote"` URL and aborts — leaving the running core untouched — if any of
-them is unreachable, because a single missing remote rule set is fatal at startup. Escape hatches:
-`--skip-prefetch`, `uci set isongwrt.main.prefetch=0`, or `ISONGWRT_SKIP_PREFETCH=1`. Boot is not
-affected (the init script starts the core directly, without going through `ctl`).
+**Restart-time prefetch (opt-in, default off)**: before the panel's start/restart, `ctl` *probes*
+every `route.rule_set[].type=="remote"` URL — HEAD only (never the body), 4s per URL, **12s total
+budget**, 8 in parallel. `restart` aborts when a rule set is confirmed unreachable (the running core
+is left untouched, and a boot-time network outage cannot lock you out because boot does not go through
+`ctl`); `start` only warns and continues. Escape hatches: `--skip-prefetch`,
+`uci set isongwrt.main.prefetch=0` (**the default**), or `ISONGWRT_SKIP_PREFETCH=1`.
+
+> The first version of this feature *downloaded* everything on that same synchronous path: 51s on a
+> real router, which exceeded the panel's XHR timeout and left the service unable to start
+> (`XHR request timed out`). Hence the current shape: probe, hard budget, and start/restart split.
 
 ## Notes
 
