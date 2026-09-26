@@ -170,6 +170,15 @@ release binary (ss2022, no TLS). See [server/README.md](server/README.md).
 
 `rules/` holds the extra rule sets shipped with this repository (see
 [rules/README.md](rules/README.md)); clients can fetch them straight from jsDelivr.
+`cn-extra` is published by the maintainer's tooling; `echsdirect` / `echsdirectip` are converted
+from the public echs-top lists and published by [.github/workflows/rules-echs.yml](.github/workflows/rules-echs.yml)
+(daily + manual, guardrailed, with `rules/manifest-echs.json` as provenance).
+
+**Restart-time prefetch**: `ctl service start|restart` (the panel buttons) first fetches every
+`route.rule_set[].type=="remote"` URL and aborts — leaving the running core untouched — if any of
+them is unreachable, because a single missing remote rule set is fatal at startup. Escape hatches:
+`--skip-prefetch`, `uci set isongwrt.main.prefetch=0`, or `ISONGWRT_SKIP_PREFETCH=1`. Boot is not
+affected (the init script starts the core directly, without going through `ctl`).
 
 ## Notes
 

@@ -1,0 +1,49 @@
+{
+ "generated_at": "2026-09-26T11:43:21Z",
+ "inputs_sha256": "0710ec1b1f771dcffc376cbc65269d24970ceabf72b8f4b9a9e6df6ea90363fb",
+ "unchanged_since": null,
+ "generator": "scripts/convert-echs-lists.py",
+ "source_url": {
+  "echsdirect": "https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list",
+  "echsdirectip": "https://raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list"
+ },
+ "compiler": "sing-box-bin",
+ "counts": {
+  "domain_suffix": 32536,
+  "domain": 105,
+  "ip_cidr": 9971
+ },
+ "previous": {
+  "domain_suffix": 32502,
+  "domain": 105,
+  "ip_cidr": 9985
+ },
+ "delta": {
+  "domain_suffix": 34,
+  "domain": 0,
+  "ip_cidr": -14,
+  "ip_shrink_pct": 0.14
+ },
+ "unparsed_lines": {
+  "domain": 0,
+  "ip": 0
+ },
+ "files": {
+  "echsdirect.json": {
+   "sha256": "3c2d40225e746b8d8ef7915b6c27be000223b444234d4302065795a01ab0dd38",
+   "bytes": 660258
+  },
+  "echsdirect.srs": {
+   "sha256": "7a88e0e666c63251008edc9919dbc30c3302a8826e3c87fb36d206fe132a6ce1",
+   "bytes": 152503
+  },
+  "echsdirectip.json": {
+   "sha256": "721eabe0353c100df46f9c4c4bb11a9cdd6f88fc4338578526279458660d3875",
+   "bytes": 228297
+  },
+  "echsdirectip.srs": {
+   "sha256": "f81f663ca6397eca045756a7554b78aa43c62e3ab33b8998608daf10af9fb2ab",
+   "bytes": 40880
+  }
+ }
+}

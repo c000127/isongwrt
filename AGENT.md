@@ -81,7 +81,20 @@ server/singbox-deploy.sh  ──►  landing host: Shadowsocks 2022 inbound (+ o
 rules/cn-extra.json  (source, readable/diffable)  +  rules/cn-extra.srs (binary, for clients)
         └─ clients consume the .srs via a remote rule-set entry, downloaded through a
            top-level http_client (per-rule-set download_detour is deprecated and fatal)
+
+echs-top lists (public text)                       ─┐
+  list/domain/direct.list   (+.suffix / exact)      │  conversion + guardrails + compile
+  list/ip/direct.list       (CIDR)                  │  scripts/convert-echs-lists.py
+        ↓ .github/workflows/rules-echs.yml          │  (daily + manual)
+rules/echsdirect.{json,srs} + rules/echsdirectip.{json,srs} + rules/manifest-echs.json
+        └─ parity gate before publishing: scripts/verify-echs-parity.py (vs the previous release)
 ```
+  * Guardrails (fail-closed — on any failure **nothing is published and the old artifacts stay**):
+    empty set rejected; the **domain** set is "only grows" (allow-list churn is additive);
+    the **IP-CIDR** set must NOT be "only grows" — upstream legitimately shrinks (measured −14),
+    so only "shrink > 10%" is rejected; a compile failure aborts.
+  * Idempotent: identical inputs ⇒ byte-identical artifacts (the manifest keeps the original
+    `generated_at`), so an unchanged upstream produces no commit.
 
 **Seams — start debugging here**: `LuCI ↔ ctl` (rpcd/ACL) · `ctl ↔ uci` (option names/defaults) ·
 `service ↔ core flags` (`-D`/`-C`, work dir vs conf dir) · `core ↔ remote rule-set` (download client,
@@ -109,6 +122,30 @@ update interval) · `CI ↔ release assets` (names, checksums, feed index).
 | **L2 maintainable** | Small surface, documented behavior, versioned rules, checksummed releases | ✅ |
 | **L3 evolvable** | Channels (stable/rc/beta/alpha) + rollback + feed for unattended updates | ✅ |
 | **L4 self-checking** | Device-level smoke test in CI; drift detection between docs and implementation; signed apk feed | ⏳ not done |
+
+### 2.5 Restart-time rule-set prefetch (B2)
+
+```
+ctl service start|restart            (the panel buttons — nothing else)
+  └─ 1) ruleset-prefetch: read every route.rule_set[].type=="remote" url from the conf dir,
+        fetch each one to a temp file, require non-empty
+           all good  → continue with the restart
+           any fail  → ABORT: exit≠0, JSON error listing the failed URLs,
+                       the currently running core is left untouched
+  └─ 2) escape hatches (any one skips step 1, byte-for-byte the old behaviour):
+           ctl service restart --skip-prefetch
+           uci set isongwrt.main.prefetch=0        (default 1)
+           ISONGWRT_SKIP_PREFETCH=1 ctl service restart
+```
+
+Why it exists: **one unreachable remote rule set is fatal at startup and the warm cache does not
+save you**, so a restart during a node outage would take the proxy down for as long as the outage
+lasts (measured; see the homobox audit report F1). Prefetch turns that into "refuse to restart".
+
+Deliberate detail: **boot is unaffected** — rc.common calls `start_service` in the init script
+directly, so a cold boot with no WAN yet cannot be locked out by a failing prefetch. Only the
+panel path is gated. `ctl ruleset-prefetch [--confdir DIR]` is also runnable on its own and is
+read-only (it only writes temp files): that is how it is verified offline and against production.
 
 ### 3.3 Known gaps (explicit "do / don't")
 
@@ -212,6 +249,7 @@ service; **there is no `clash_api` / `clash_port` / `clash_secret` option** (rem
 
 ```sh
 # on a device
+/usr/lib/isongwrt/ctl ruleset-prefetch [--confdir /etc/isongwrt/conf]   # read-only: fetch every remote rule set
 /usr/lib/isongwrt/ctl status            # running state, version, config-check result
 /usr/lib/isongwrt/ctl check             # validate config only
 /usr/lib/isongwrt/ctl service restart   # restart the managed core
@@ -299,3 +337,10 @@ sh feed.sh                                        # add/refresh the package feed
 | **work_dir / conf_dir** | the core's working directory (`-D`) and configuration directory (`-C`) |
 | **rule set** | a sing-box rule collection; `.json` is the source format, `.srs` the binary one |
 | **http_client** | a top-level sing-box 1.14+ download-client definition; remote rule sets reference it by tag |
+
+14. **`pgrep -f <pattern> | xargs kill` self-matches** the shell that carries the pattern in its own
+    command line (cost: three killed test sessions). Always scope such cleanups to processes whose
+    `argv[0]`/ancestry you actually control.
+15. **busybox awk: save `RLENGTH` immediately.** A second `match()` overwrites `RSTART`/`RLENGTH`,
+    which silently produced an infinite loop in the rule-set URL scanner (it looked like a hang).
+    The scanner now also breaks out when a scan pass made no progress.

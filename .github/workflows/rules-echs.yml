@@ -1,0 +1,143 @@
+name: rules-echs
+
+# 把 echs-top 的两条公开列表（domain/direct.list、ip/direct.list）转成 sing-box 规则集，
+# 编译为 .srs 并提交到本仓库 rules/ —— 取代此前"手工转换 + scp 到路由器"的做法（无版本化/无护栏/无溯源）。
+#
+# 产物：rules/echsdirect.{json,srs}、rules/echsdirectip.{json,srs}、rules/manifest-echs.json
+#
+# 安全与可复现：
+#   * 编译器版本 pin 到 v1.15.0-alpha.6；上游**不发布 checksums**（三个候选名实测 404），
+#     因此用产物 `Revision` 字段与 tag 的 commit 逐一比对来锚定（见 env.SING_BOX_TAG_COMMIT）。
+#   * 护栏在转换器里（scripts/convert-echs-lists.py）：空集拒绝；域名集只增不减；
+#     IP 段集只拦"缩水 >10%"（实测上游会自然缩小，不能用只增不减）；
+#     任一护栏或编译失败 → 非 0 退出 → 本 job 失败 → **不提交、旧产物保留**。
+#   * 发布前再跑一次等价性比对（scripts/verify-echs-parity.py）：与上一版产物逐条抽样对照。
+
+on:
+  schedule:
+    # 每日一次（UTC 03:17，避开整点高峰）；上游列表日更，重跑无变更时不会产生提交
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+# 两次重叠运行不能同时写 rules/：新的取消旧的
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：默认只读，只有本 job 需要写 contents 才能提交产物
+permissions:
+  contents: read
+
+env:
+  SING_BOX_TAG: v1.15.0-alpha.6
+  # tag v1.15.0-alpha.6 指向的 commit（GitHub API 实测；产物 sing-box version 的 Revision 必须等于它）
+  SING_BOX_TAG_COMMIT: 8330820fa62505f9574e4c35cd969d9af6eb7769
+  SING_BOX_ASSET: sing-box-1.15.0-alpha.6-linux-amd64-musl.tar.gz
+
+jobs:
+  convert-and-publish:
+    name: convert + guardrails + publish
+    runs-on: ubuntu-latest
+    # 只允许在 main 上发布（schedule 默认分支即 main；手动触发时防止在分支/标签上写产物）
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: checkout
+        # actions/checkout v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+
+      - name: pin check (tag commit still matches the pinned commit)
+        run: |
+          set -euo pipefail
+          got=$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/SagerNet/sing-box/git/ref/tags/${SING_BOX_TAG}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          echo "tag ${SING_BOX_TAG} -> ${got}"
+          [ "$got" = "${SING_BOX_TAG_COMMIT}" ] || {
+            echo "::error::tag ${SING_BOX_TAG} now points to ${got}, expected ${SING_BOX_TAG_COMMIT}"; exit 1; }
+
+      - name: fetch sing-box (pinned) and anchor by Revision
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sb
+          curl -fsSL -o /tmp/sb/sb.tar.gz \
+            "https://github.com/SagerNet/sing-box/releases/download/${SING_BOX_TAG}/${SING_BOX_ASSET}"
+          tar -xzf /tmp/sb/sb.tar.gz -C /tmp/sb
+          bin=$(find /tmp/sb -type f -name sing-box -perm -u+x | head -1)
+          [ -n "$bin" ] || { echo "::error::sing-box binary not found in the release asset"; exit 1; }
+          chmod +x "$bin"
+          "$bin" version
+          rev=$("$bin" version | awk '/^Revision:/ {print $2}')
+          [ "$rev" = "${SING_BOX_TAG_COMMIT}" ] || {
+            echo "::error::binary Revision ${rev} != pinned ${SING_BOX_TAG_COMMIT}"; exit 1; }
+          echo "SING_BOX_BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: keep the previous artifacts as the guardrail baseline
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/prev
+          # 基线必须是**完整**的四个文件（json + srs）：缺 .srs 会让等价性比对退化成一片假差异
+          ok=1
+          for f in echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs; do
+            [ -f "rules/$f" ] || ok=0
+          done
+          if [ "$ok" = 1 ]; then
+            cp rules/echsdirect.json rules/echsdirect.srs rules/echsdirectip.json rules/echsdirectip.srs /tmp/prev/
+            echo "BASELINE=yes" >> "$GITHUB_ENV"
+          else
+            echo "BASELINE=no (first publish or incomplete baseline: only the empty-set guardrails apply)" >> "$GITHUB_ENV"
+          fi
+
+      - name: fetch upstream lists (public, plain text)
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 60 -o /tmp/domain.list \
+            https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list
+          curl -fsSL --max-time 60 -o /tmp/ip.list \
+            https://raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list
+          wc -l /tmp/domain.list /tmp/ip.list
+
+      - name: "convert + guardrails + compile (fail-closed: no publish on any failure)"
+        run: |
+          set -euo pipefail
+          args=(--out-dir rules --sing-box "$SING_BOX_BIN"
+                --domain-file /tmp/domain.list --ip-file /tmp/ip.list)
+          [ "$BASELINE" = yes ] && args+=(--baseline-dir /tmp/prev)
+          python3 scripts/convert-echs-lists.py "${args[@]}"
+
+      - name: equivalence against the previous artifacts (when there is one)
+        if: env.BASELINE == 'yes'
+        run: |
+          set -euo pipefail
+          # 脚本自称即门禁：不一致时返回非 0（含条目数与逐条抽样判定）
+          python3 scripts/verify-echs-parity.py --old-dir /tmp/prev --new-dir rules \
+            --sing-box "$SING_BOX_BIN" --samples 20 --report /tmp/parity.json
+          python3 -c "import json;r=json.load(open('/tmp/parity.json'));assert r['ok'],r['failed'];print('parity ok; counts =',r['counts'])"
+
+      - name: show what changed
+        run: |
+          set -euo pipefail
+          git status --short rules/
+          git diff --stat rules/ || true
+
+      - name: commit and push (only when something changed)
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- rules/ && [ -z "$(git status --porcelain rules/)" ]; then
+            echo "no change in rules/ — nothing to publish"
+            exit 0
+          fi
+          git config user.name  'isongwrt-rules-bot'
+          git config user.email 'isongwrt-rules-bot@users.noreply.github.com'
+          git add rules/echsdirect.json rules/echsdirect.srs \
+                  rules/echsdirectip.json rules/echsdirectip.srs rules/manifest-echs.json
+          {
+            echo "rules(echs): 自动更新 echsdirect / echsdirectip（$(date -u +%Y-%m-%dT%H:%M:%SZ)）"
+            echo
+            echo "source: https://github.com/echs-top/proxy (list/domain/direct.list, list/ip/direct.list)"
+            echo "compiler: sing-box ${SING_BOX_TAG} (Revision ${SING_BOX_TAG_COMMIT})"
+            echo "counts / sha256: 见 rules/manifest-echs.json"
+          } > /tmp/commit-msg.txt
+          git commit -F /tmp/commit-msg.txt
+          git push origin HEAD:main

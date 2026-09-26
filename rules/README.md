@@ -10,6 +10,45 @@ Rule sets shipped with this repository. They are **generated outside this reposi
 
 Both files are committed in the same change; never update one without the other.
 
+## echsdirect / echsdirectip (upstream echs-top lists)
+
+Two more generated rule sets ship here, produced by CI from the public echs-top lists:
+
+| File | Content | Source |
+|---|---|---|
+| `echsdirect.json` / `.srs` | ECH direct domains — 32 536 `domain_suffix` + 105 exact `domain` | `raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list` |
+| `echsdirectip.json` / `.srs` | ECH direct IP ranges — 9 971 `ip_cidr` | `raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list` |
+| `manifest-echs.json` | provenance: source URLs, `generated_at`, counts, per-file `sha256`, delta vs the previous release | — |
+
+Pipeline: `.github/workflows/rules-echs.yml` (daily `schedule` + `workflow_dispatch`)
+→ downloads the lists → `scripts/convert-echs-lists.py` (parse → guardrails → compile with a
+**pinned** sing-box) → `scripts/verify-echs-parity.py` (parity gate against the previous release)
+→ commits the artifacts. Fail-closed: any guardrail or compile failure publishes nothing and the
+previous artifacts stay in place.
+
+Guardrails (measured, not guessed):
+
+* empty set → rejected (both sets);
+* **domain set**: "only grows" — upstream churn is additive (measured +34, 0 removals);
+* **IP-CIDR set**: must **not** be "only grows" — upstream legitimately shrinks (measured −14,
+  i.e. −0.14%), so the gate rejects only a shrink larger than 10%;
+* compile failure → abort; and identical inputs produce byte-identical artifacts (no daily noise commits).
+
+Reproduce locally:
+
+```sh
+curl -fsSL -o /tmp/domain.list https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list
+curl -fsSL -o /tmp/ip.list     https://raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list
+python3 scripts/convert-echs-lists.py --out-dir rules --domain-file /tmp/domain.list --ip-file /tmp/ip.list \
+        --sing-box /path/to/sing-box --baseline-dir rules
+python3 scripts/verify-echs-parity.py --old-dir <previous> --new-dir rules --sing-box /path/to/sing-box
+```
+
+> Client-side note: these two sets are referenced from clients as `type: remote` **with an explicit
+> `http_client`** (jsDelivr primary, `raw.githubusercontent.com` fallback). A `http_client` whose
+> `detour` points at a `direct`-type outbound is rejected in sing-box 1.15
+> (`detour to an empty direct outbound makes no sense`), and omitting the client is fatal too.
+
 ## Client usage
 
 Reference the rule set from `route.rule_set`. Since sing-box 1.14 the download

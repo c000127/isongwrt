@@ -3,7 +3,9 @@
 # 依赖：OpenWrt 基础组件（uci / tar / busybox；下载走 curl 或系统自带 uclient-fetch/wget）
 # 内核来源：一律取自官方 Releases（SagerNet/sing-box），按架构自动匹配并优先 musl 构建；
 #          本项目不编译内核（CI 只构建 LuCI 包）。
-# 用法：ctl <status|channels|releases|installed|install|rollback|remove|config-*> ...
+# 用法：ctl <status|channels|releases|installed|install|rollback|remove|config-*|ruleset-prefetch|service> ...
+#       ruleset-prefetch [--confdir DIR]  重启前预取全部远端规则集（只读，可离线/生产试跑）
+#       service <start|restart> [--skip-prefetch]
 set -u
 
 APP=isongwrt
@@ -1012,6 +1014,121 @@ do_channels() {
 	printf ']}\n'
 }
 
+# ---------- B2：重启前预取远端规则集（方案 A，2026-09-26） ----------
+# 动机（实测，homobox reports/singbox-config-audit-20260926.md F1）：只要有一条远端规则集在启动时
+# 拉不到，sing-box 就 FATAL 起不来，**热缓存也不兜底**（冷启动 1.91s / 热 0.04s，但 1 条不可达照挂）。
+# 后果：节点故障 / GitHub 限流期间重启 = 直接失去代理。因此在**面板触发的** start/restart 前先把
+# 全部远端规则集抓一遍：全部成功才继续；任一失败 → 不重启 + 非 0 + JSON 错误（列出失败 URL），
+# 当前运行内核保持不动。
+#
+# 逃生门（任一命中即跳过预取，行为与改造前逐字等价）：
+#   * 参数：`ctl service <start|restart> --skip-prefetch`
+#   * uci ：`isongwrt.main.prefetch='0'`（默认 1）
+#   * 环境：`ISONGWRT_SKIP_PREFETCH=1`
+#
+# ★ 开机自启**不受影响**：rc.common 直接走 init.d 的 start_service，不经过 ctl，
+#   所以"开机时 WAN 还没起来"不会因预取失败而锁死服务；只有面板按钮这条路被门禁化。
+#
+# busybox 兼容：只用 awk/sed/grep/wc/mktemp/rm，不用 python3、pgrep -c、timeout、paste、fold。
+# 下载复用 dl_get（curl → uclient-fetch → wget 兜底），超时由 dl_get 传给底层命令。
+
+prefetch_enabled() {
+	[ "${ISONGWRT_SKIP_PREFETCH:-0}" = "1" ] && return 1
+	[ "$(cfgd prefetch 1)" = "1" ] || return 1
+	return 0
+}
+
+collect_remote_urls() { # <file>：按 token 顺序扫描，取 type=="remote" 那个对象的 url（兼容单行/多行）
+	# 为什么用 awk 状态机：面板写单行 JSON、手写/归档多为 pretty-printed，两种都要能解析，
+	# 且不能依赖 jq（OpenWrt 默认没有）。
+	awk '
+	BEGIN { pending = 0 }
+	{
+		line = $0
+		while (length(line) > 0) {
+			before = length(line)
+			t = match(line, /"type"[ \t]*:[ \t]*"[A-Za-z0-9_-]+"/)
+			tl = (t > 0) ? RLENGTH : 0        # 必须立刻取走 RLENGTH：第二次 match() 会覆盖它
+			u = match(line, /"url"[ \t]*:[ \t]*"[^"]+"/)
+			ul = (u > 0) ? RLENGTH : 0
+			if (t == 0 && u == 0) break
+			if (u == 0 || (t > 0 && t < u)) {
+				seg = substr(line, t, tl)
+				sub(/^.*"type"[ \t]*:[ \t]*"/, "", seg)
+				sub(/".*$/, "", seg)
+				pending = (seg == "remote") ? 1 : 0
+				line = substr(line, t + tl)
+			} else {
+				if (pending) {
+					seg = substr(line, u, ul)
+					sub(/^"url"[ \t]*:[ \t]*"/, "", seg)
+					sub(/"$/, "", seg)
+					print seg
+					pending = 0
+				}
+				line = substr(line, u + ul)
+			}
+			if (length(line) >= before) break   # 防御：任何原因没前进就退出，绝不空转
+		}
+	}' "$1" 2>/dev/null
+}
+
+do_ruleset_prefetch() { # [--confdir DIR] [--quiet]：全成功返回 0；任一失败打印 JSON 错误并返回 1
+	_pd="$CONF_DIR"; _quiet=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--confdir) _pd="${2:-$CONF_DIR}" ;;
+			--quiet)   _quiet=1 ;;
+			--*)       die "ruleset-prefetch: unknown option $1" ;;
+		esac
+		shift
+	done
+	[ -d "$_pd" ] || die "ruleset-prefetch: config directory not found: $_pd"
+	# 临时目录固定在 /tmp 并用 mktemp：预取是只读操作，不创建/修改任何持久状态（生产可安全试跑）
+	_tmpd=$(mktemp -d /tmp/isongwrt-prefetch.XXXXXX 2>/dev/null) || _tmpd="/tmp/isongwrt-prefetch.$$"
+	[ -L "$_tmpd" ] && die "ruleset-prefetch: refusing to use a symlink as temp dir: $_tmpd"
+	mkdir -p "$_tmpd" 2>/dev/null || die "ruleset-prefetch: cannot create temp dir: $_tmpd"
+	_total=0; _okn=0; _bytes=0; _failed=""
+	for _cf in "$_pd"/*.json; do
+		[ -f "$_cf" ] || continue
+		for _u in $(collect_remote_urls "$_cf"); do
+			_total=$((_total + 1))
+			_out="$_tmpd/rs.$_total"
+			_okd=0
+			if dl_get "$_u" "$_out" 25 && [ -s "$_out" ]; then
+				_okd=1
+			elif [ -n "$GH_PROXY" ]; then
+				# 直连失败时经 github_proxy 前缀重试（与 fetch_releases_atom/rest 的既有写法一致；
+				# 生产 uci 已把该选项设为 ghfast.top）
+				case "$_u" in
+					https://github.com/*|https://api.github.com/*|https://raw.githubusercontent.com/*)
+						dl_get "${GH_PROXY}${_u}" "$_out" 25 && [ -s "$_out" ] && _okd=1 ;;
+				esac
+			fi
+			if [ "$_okd" = 1 ]; then
+				_okn=$((_okn + 1))
+				_b=$(wc -c < "$_out" 2>/dev/null | tr -d ' ')
+				[ -n "${_b:-}" ] || _b=0
+				_bytes=$((_bytes + _b))
+			else
+				_failed="$_failed $_u"
+			fi
+		done
+	done
+	rm -rf "$_tmpd" 2>/dev/null
+	if [ -n "$_failed" ]; then
+		_fj=""
+		for _u in $_failed; do
+			_fj="${_fj}${_fj:+,}\"$(json_esc "$_u")\""
+		done
+		printf '{"ok":false,"error":"rule-set prefetch failed: %s of %s unreachable","failed":[%s],"prefetched":%s,"total":%s}\n' \
+			"$(( _total - _okn ))" "$_total" "$_fj" "$_okn" "$_total" >&2
+		return 1
+	fi
+	[ "$_quiet" = 1 ] || ok ",\"prefetched\":$_okn,\"total\":$_total,\"bytes\":$_bytes"
+	return 0
+}
+
 case "${1:-status}" in
 	status)      do_status ;;
 	channels)    do_channels "${2:-}" ;;
@@ -1033,6 +1150,7 @@ case "${1:-status}" in
 	rollback)    do_rollback ;;
 	remove)      _v="${2:-}"; require_version "$_v"; do_remove "$_v" "${3:-}" ;;
 	config-list)    do_config_list ;;
+	ruleset-prefetch) do_ruleset_prefetch "${2:-}" "${3:-}" ;;
 	config-get)     _n="${2:-}"; [ -n "$_n" ] || die "config-get requires a config name"; do_config_get "$_n" ;;
 	config-save)    _n="${2:-}"; [ -n "$_n" ] || die "config-save requires a config name"; do_config_save "$_n" "${3:-}" ;;
 	config-restore) _n="${2:-}"; [ -n "$_n" ] || die "config-restore requires a backup file name"; do_config_restore "$_n" ;;
@@ -1052,6 +1170,18 @@ case "${1:-status}" in
 	log)         do_log "${2:-200}" ;;
 	service)     case "${2:-}" in
 			start|stop|restart)
+				# B2：面板触发的启动/重启前先预取全部远端规则集；失败则中止且不动当前运行内核。
+				# 逃生门：--skip-prefetch / uci prefetch=0 / ISONGWRT_SKIP_PREFETCH=1（三者任一即跳过）。
+				_skip_pf=0
+				for _a in ${3:-} ${4:-} ${5:-}; do
+					[ "$_a" = "--skip-prefetch" ] && _skip_pf=1
+				done
+				if [ "$2" != "stop" ] && [ "$_skip_pf" = 0 ] && prefetch_enabled; then
+					if ! do_ruleset_prefetch --confdir "$CONF_DIR" --quiet; then
+						printf '[ctl] prefetch failed: refusing to %s (the running core is left untouched)\n' "$2" >&2
+						exit 1
+					fi
+				fi
 				# 标记为手动启动（不受 UCI enabled=0 限制）
 				ISONGWRT_MANUAL_START=1 /etc/init.d/isongwrt "$2" >/dev/null 2>&1 || die "服务操作失败：$2"
 				if [ "$2" = "stop" ] || [ "$2" = "restart" ]; then
