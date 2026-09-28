@@ -3,13 +3,16 @@
   "rules": [
     {
       "domain_suffix": [
+        "appguard.za.group",
+        "bankappgw.za.group",
         "customer.yostar.net",
         "daguoxiaoxian.com",
         "gamerfusiontech.com",
         "l14-prod-hk-patch-sirius.gamerfusiontech.com",
         "open.yostar.net",
         "udata-api.open.yostar.net",
-        "yostar.net"
+        "yostar.net",
+        "za.group"
       ]
     }
   ]
