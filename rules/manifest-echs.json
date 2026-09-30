@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-09-29T09:51:45Z",
- "inputs_sha256": "1418ada1552ab982ff6e30433eebe7a3c87207e34b446c33f2ca7e548a7efe2d",
+ "generated_at": "2026-09-30T09:43:56Z",
+ "inputs_sha256": "56b66750a941648374e73129fdd82613dd23be68d7939b8bfa2130ac6a35cb27",
  "unchanged_since": null,
  "generator": "scripts/convert-echs-lists.py",
  "source_url": {
@@ -11,17 +11,17 @@
  "counts": {
   "domain_suffix": 32795,
   "domain": 105,
-  "ip_cidr": 9978
+  "ip_cidr": 9983
  },
  "previous": {
   "domain_suffix": 32795,
   "domain": 105,
-  "ip_cidr": 9976
+  "ip_cidr": 9978
  },
  "delta": {
   "domain_suffix": 0,
   "domain": 0,
-  "ip_cidr": 2
+  "ip_cidr": 5
  },
  "unparsed_lines": {
   "domain": 0,
@@ -37,12 +37,12 @@
    "bytes": 153617
   },
   "echsdirectip.json": {
-   "sha256": "c15b0f6330b73cb1c8b330cb78bb34bb45df5dade32bf3ae05fb9e3ffbd0a841",
-   "bytes": 228484
+   "sha256": "c590e2f08019dfc281f317f86a65242e3c395a5decf5f2955f8d4a69a8e4ee91",
+   "bytes": 228602
   },
   "echsdirectip.srs": {
-   "sha256": "dc88079ec3447107e6d29f3d9a3b44a078f9c73af308272646da234aefc1e98b",
-   "bytes": 40890
+   "sha256": "1ee415ba02381ce78ce88fcca7060d5d4f2d9e5b97d2a6a9bd0f5e68d557893b",
+   "bytes": 40902
   }
  }
 }
