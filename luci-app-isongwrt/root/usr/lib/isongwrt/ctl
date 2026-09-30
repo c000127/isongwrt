@@ -1355,7 +1355,7 @@ case "${1:-status}" in
 	             while [ $# -gt 0 ]; do
 	                 case "$1" in
 	                     --skip-prefetch)  _skip_pf=1 ;;
-	                     --verify-seconds)
+	                     --verify-seconds|--seconds)   # 用法注释承诺 `service verify --seconds N`，解析器原先只认长名（实测 unknown option）
 	                         # 带值选项必须 shift 两次（早期写法只 shift 一次 → 值会被当成未知参数：
 	                         # "service: unknown option 5" —— 实测踩过，与 --budget 那次同类）
 	                         _vsec="${2:-$VERIFY_SECONDS}"; shift ;;
