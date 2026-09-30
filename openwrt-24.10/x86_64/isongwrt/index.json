@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "architecture": "x86_64",
+  "packages": {
+    "luci-app-isongwrt": "0.2.0-r3"
+  }
+}
