@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-10-03T09:10:49Z",
+ "generated_at": "2026-10-04T09:50:07Z",
  "inputs_sha256": "ee62d1bfe69063a1243d17810531f32d39d405bf090bc7539b055eb8c5c22832",
  "unchanged_since": null,
  "generator": "scripts/convert-echs-lists.py",
@@ -16,12 +16,12 @@
  "previous": {
   "domain_suffix": 32795,
   "domain": 105,
-  "ip_cidr": 10003
+  "ip_cidr": 10004
  },
  "delta": {
   "domain_suffix": 0,
   "domain": 0,
-  "ip_cidr": 1
+  "ip_cidr": 0
  },
  "unparsed_lines": {
   "domain": 0,
