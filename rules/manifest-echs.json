@@ -1,6 +1,6 @@
 {
- "generated_at": "2026-10-07T10:17:51Z",
- "inputs_sha256": "d7ec2df3c5f4f9ccca5ad86b2ab3532836ae9d68a6f9b1497b954d1fedf00e31",
+ "generated_at": "2026-10-08T10:37:13Z",
+ "inputs_sha256": "a9090a4a22a6f0f5e51d24541a742fe9a636150b4115bcfde35bf7cb8ba82857",
  "unchanged_since": null,
  "generator": "scripts/convert-echs-lists.py",
  "source_url": {
@@ -9,9 +9,9 @@
  },
  "compiler": "sing-box",
  "counts": {
-  "domain_suffix": 32795,
+  "domain_suffix": 32908,
   "domain": 105,
-  "ip_cidr": 10019
+  "ip_cidr": 10018
  },
  "previous": {
   "domain_suffix": 32795,
@@ -19,9 +19,10 @@
   "ip_cidr": 10019
  },
  "delta": {
-  "domain_suffix": 0,
+  "domain_suffix": 113,
   "domain": 0,
-  "ip_cidr": 0
+  "ip_cidr": -1,
+  "ip_shrink_pct": 0.01
  },
  "unparsed_lines": {
   "domain": 0,
@@ -29,20 +30,20 @@
  },
  "files": {
   "echsdirect.json": {
-   "sha256": "c8fd10181febdde503d2919d382e2d1815f492c420c37f477d6c896f0e8d9811",
-   "bytes": 665489
+   "sha256": "a86c602e57444c081c6b9fc75cd50af7575d406715b6b699c5240a1662a98aee",
+   "bytes": 667719
   },
   "echsdirect.srs": {
-   "sha256": "c41033fb1b931beefee228c946b391c6b7d55a38bda2d29844c843ad7d17d123",
-   "bytes": 153617
+   "sha256": "176d36c93f21f300b9f7a6d39c1687a953ad6181555a626bdbeb34c47f40c501",
+   "bytes": 154102
   },
   "echsdirectip.json": {
-   "sha256": "68cc27b2e5e6ba79e2587edf9385a0966e94177d38945ce3672ac493c2d04844",
-   "bytes": 229531
+   "sha256": "0962ab49be5b4d639ee361acf7ea404c4e0a5aff72b6fb94ade1e0651397926c",
+   "bytes": 229507
   },
   "echsdirectip.srs": {
-   "sha256": "6538196808655275a631282fec6f8a57c1e9b275c2923296c842af32035a0f26",
-   "bytes": 41004
+   "sha256": "a93330e7a961a6cbda5787e71d2a0453091630825bd05c930fbfcc057c2cfc87",
+   "bytes": 40993
   }
  }
 }
