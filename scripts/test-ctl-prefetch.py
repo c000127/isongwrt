@@ -29,8 +29,8 @@ def main():
     if '"$(( _total - _ok ))"' in src:
         fails.append('stats: 仍用 total-ok 作为不可达数')
     # 3) 探测说明不再暗示缓存预热
-    if '不等于预热' not in src:
-        fails.append('doc: prefetch 说明未校正')
+    if '不等于缓存预热' not in src:
+        fails.append('doc: prefetch 说明未校正（需含“不等于缓存预热”）')
     # 4) 守卫语义的桩执行
     guard = r'''
         _svc="$1"; _core="$2"; _pf="$3"
