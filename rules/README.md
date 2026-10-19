@@ -16,23 +16,51 @@ Two more generated rule sets ship here, produced by CI from the public echs-top 
 
 | File | Content | Source |
 |---|---|---|
-| `echsdirect.json` / `.srs` | ECH direct domains — 32 536 `domain_suffix` + 105 exact `domain` | `raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list` |
-| `echsdirectip.json` / `.srs` | ECH direct IP ranges — 9 971 `ip_cidr` | `raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list` |
+| `echsdirect.json` / `.srs` | upstream direct-domain list; counts in the manifest | `raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list` |
+| `echsdirectip.json` / `.srs` | upstream direct-IP list; counts in the manifest | `raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list` |
 | `manifest-echs.json` | provenance: source URLs, `generated_at`, counts, per-file `sha256`, delta vs the previous release | — |
 
-Pipeline: `.github/workflows/rules-echs.yml` (daily `schedule` + `workflow_dispatch`)
-→ downloads the lists → `scripts/convert-echs-lists.py` (parse → guardrails → compile with a
-**pinned** sing-box) → `scripts/verify-echs-parity.py` (parity gate against the previous release)
-→ commits the artifacts. Fail-closed: any guardrail or compile failure publishes nothing and the
-previous artifacts stay in place.
+Pipeline: `.github/workflows/rules-echs.yml` (daily at 03:17 UTC, manual and relevant
+source pushes) → offline regressions → download → parse/guard/compile in staging
+with pinned sing-box alpha.12 → verify source/binary consistency and sampled
+membership against the previous release → rebuild and compare all five files →
+publish only changed artifacts. Failures leave the published release intact.
+The name does not imply protocol detection or successful ECH negotiation.
 
 Guardrails (measured, not guessed):
 
 * empty set → rejected (both sets);
-* **domain set**: "only grows" — upstream churn is additive (measured +34, 0 removals);
+* **domain set**: published entries cannot be removed, even by a same-count replacement;
 * **IP-CIDR set**: must **not** be "only grows" — upstream legitimately shrinks (measured −14,
   i.e. −0.14%), so the gate rejects only a shrink larger than 10%;
-* compile failure → abort; and identical inputs produce byte-identical artifacts (no daily noise commits).
+* unknown effective lines, invalid UTF-8/CIDRs, incomplete baselines, compile/core
+  errors and source/binary mismatches → abort;
+* identical inputs and compiler produce byte-identical artifacts including the
+  manifest; changed provenance or compiler identity can update the manifest once.
+
+Domain patterns follow the [Mihomo trie](https://github.com/MetaCubeX/mihomo/blob/Meta/component/trie/domain.go):
+
+| Input | Meaning | sing-box output |
+|---|---|---|
+| `example.com` | exact name | `domain` |
+| `+.example.com` | base and all subdomains | `domain_suffix: example.com` |
+| `.example.com` | subdomains only | `domain_suffix: .example.com` |
+| `*.example.com` | exactly one label before the base | anchored `domain_regex` |
+| `sub.*.example.com` | one wildcard label at that position | anchored `domain_regex` |
+
+Combined `+.`/`.` and whole-label wildcard forms are supported. Bare `*` means one
+label, not all domains. Blank lines and `#`/`//` comments are ignored. Literal labels
+must use ASCII DNS characters (including underscores); partial wildcards, foreign
+list formats and other syntax stop conversion with line numbers. CIDRs require a
+prefix and are validated and normalized with `ipaddress`; host bits are masked.
+Domain and IP parse statistics are kept separately.
+
+The verifier decompiles all four SRS files and compares their content with the
+source, normalizing IP prefixes. It then tests base/child/deep/boundary names and
+IP range boundaries with native matching. Its regex model accepts only the
+converter's small grammar. Expected source additions/removals are reported;
+sampling is not a proof of whole-set equivalence. Exit codes: 0 consistent,
+1 sampled mismatch, 2 input/dependency error. An error report always has `ok: false`.
 
 Reproduce locally:
 
@@ -42,7 +70,12 @@ curl -fsSL -o /tmp/ip.list     https://raw.githubusercontent.com/echs-top/proxy/
 python3 scripts/convert-echs-lists.py --out-dir rules --domain-file /tmp/domain.list --ip-file /tmp/ip.list \
         --sing-box /path/to/sing-box --baseline-dir rules
 python3 scripts/verify-echs-parity.py --old-dir <previous> --new-dir rules --sing-box /path/to/sing-box
+python3 scripts/test-echs-rules.py --sing-box /path/to/sing-box
 ```
+
+Converter errors return 2 without a success summary. `--dry-run` checks parsing
+and guardrails only. `--skip-compile` is for debug JSON in an empty output directory;
+it cannot overwrite a published release. No device access or deployment is involved.
 
 > Client-side note: these two sets are referenced from clients as `type: remote` **with an explicit
 > `http_client`** (jsDelivr primary, `raw.githubusercontent.com` fallback). A `http_client` whose

@@ -173,6 +173,9 @@ release binary (ss2022, no TLS). See [server/README.md](server/README.md).
 `cn-extra` is published by the maintainer's tooling; `echsdirect` / `echsdirectip` are converted
 from the public echs-top lists and published by [.github/workflows/rules-echs.yml](.github/workflows/rules-echs.yml)
 (daily + manual, guardrailed, with `rules/manifest-echs.json` as provenance).
+Conversion preserves single-label wildcards and subdomain-only boundaries. Unknown
+lines, invalid CIDRs, source/binary mismatches or core errors block publication.
+Offline regressions and byte-for-byte rebuild checks run before publishing.
 
 `applications-safe` is built daily by
 [rules-applications.yml](.github/workflows/rules-applications.yml), preserving explicit

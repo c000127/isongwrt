@@ -92,9 +92,12 @@ rules/echsdirect.{json,srs} + rules/echsdirectip.{json,srs} + rules/manifest-ech
   * Guardrails (fail-closed — on any failure **nothing is published and the old artifacts stay**):
     empty set rejected; the **domain** set is "only grows" (allow-list churn is additive);
     the **IP-CIDR** set must NOT be "only grows" — upstream legitimately shrinks (measured −14),
-    so only "shrink > 10%" is rejected; a compile failure aborts.
+    so only "shrink > 10%" is rejected; a compile failure aborts. Unknown effective
+    lines, invalid CIDRs and source/binary mismatches also abort. Domain removals
+    are checked by entry membership, not just counts. Wildcards preserve label boundaries.
   * Idempotent: identical inputs ⇒ byte-identical artifacts (the manifest keeps the original
-    `generated_at`), so an unchanged upstream produces no commit.
+    `generated_at`), so unchanged inputs and compiler produce no commit. Preserve
+    all five baseline files, including the manifest; compare a second build before publishing.
 
 **Seams — start debugging here**: `LuCI ↔ ctl` (rpcd/ACL) · `ctl ↔ uci` (option names/defaults) ·
 `service ↔ core flags` (`-D`/`-C`, work dir vs conf dir) · `core ↔ remote rule-set` (download client,

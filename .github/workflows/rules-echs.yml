@@ -1,143 +1,153 @@
 name: rules-echs
 
-# 把 echs-top 的两条公开列表（domain/direct.list、ip/direct.list）转成 sing-box 规则集，
-# 编译为 .srs 并提交到本仓库 rules/ —— 取代此前"手工转换 + scp 到路由器"的做法（无版本化/无护栏/无溯源）。
-#
-# 产物：rules/echsdirect.{json,srs}、rules/echsdirectip.{json,srs}、rules/manifest-echs.json
-#
-# 安全与可复现：
-#   * 编译器版本 pin 到 v1.15.0-alpha.6；上游**不发布 checksums**（三个候选名实测 404），
-#     因此用产物 `Revision` 字段与 tag 的 commit 逐一比对来锚定（见 env.SING_BOX_TAG_COMMIT）。
-#   * 护栏在转换器里（scripts/convert-echs-lists.py）：空集拒绝；域名集只增不减；
-#     IP 段集只拦"缩水 >10%"（实测上游会自然缩小，不能用只增不减）；
-#     任一护栏或编译失败 → 非 0 退出 → 本 job 失败 → **不提交、旧产物保留**。
-#   * 发布前再跑一次等价性比对（scripts/verify-echs-parity.py）：与上一版产物逐条抽样对照。
-
 on:
   schedule:
-    # 每日一次（UTC 03:17，避开整点高峰）；上游列表日更，重跑无变更时不会产生提交
+    # Daily at 11:17 Asia/Shanghai.
     - cron: '17 3 * * *'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rules-echs.yml'
+      - 'scripts/convert-echs-lists.py'
+      - 'scripts/verify-echs-parity.py'
+      - 'scripts/test-echs-rules.py'
 
-# 两次重叠运行不能同时写 rules/：新的取消旧的
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: rules-echs-${{ github.ref }}
+  cancel-in-progress: false
 
-# 最小权限：默认只读，只有本 job 需要写 contents 才能提交产物
 permissions:
   contents: read
 
 env:
-  SING_BOX_TAG: v1.15.0-alpha.6
-  # tag v1.15.0-alpha.6 指向的 commit（GitHub API 实测；产物 sing-box version 的 Revision 必须等于它）
-  SING_BOX_TAG_COMMIT: 8330820fa62505f9574e4c35cd969d9af6eb7769
-  SING_BOX_ASSET: sing-box-1.15.0-alpha.6-linux-amd64-musl.tar.gz
+  SING_BOX_TAG: v1.15.0-alpha.12
+  SING_BOX_TAG_COMMIT: 25b0d5ea3e466d246c708ac0f20d0448110e566c
+  SING_BOX_ASSET: sing-box-1.15.0-alpha.12-linux-amd64.tar.gz
 
 jobs:
   convert-and-publish:
-    name: convert + guardrails + publish
+    name: convert + verify + publish
     runs-on: ubuntu-latest
-    # 只允许在 main 上发布（schedule 默认分支即 main；手动触发时防止在分支/标签上写产物）
+    timeout-minutes: 10
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
     steps:
-      - name: checkout
-        # actions/checkout v6
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - name: pin check (tag commit still matches the pinned commit)
+      - name: Check the pinned tag and compiler revision
+        shell: bash
         run: |
           set -euo pipefail
-          got=$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+          got=$(curl -fLsS --retry 3 --max-time 30 -H 'Accept: application/vnd.github+json' \
             "https://api.github.com/repos/SagerNet/sing-box/git/ref/tags/${SING_BOX_TAG}" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
-          echo "tag ${SING_BOX_TAG} -> ${got}"
-          [ "$got" = "${SING_BOX_TAG_COMMIT}" ] || {
-            echo "::error::tag ${SING_BOX_TAG} now points to ${got}, expected ${SING_BOX_TAG_COMMIT}"; exit 1; }
-
-      - name: fetch sing-box (pinned) and anchor by Revision
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/sb
-          curl -fsSL -o /tmp/sb/sb.tar.gz \
+          test "$got" = "$SING_BOX_TAG_COMMIT"
+          mkdir -p "$RUNNER_TEMP/core"
+          curl -fLsS --retry 3 --max-time 120 -o "$RUNNER_TEMP/core.tar.gz" \
             "https://github.com/SagerNet/sing-box/releases/download/${SING_BOX_TAG}/${SING_BOX_ASSET}"
-          tar -xzf /tmp/sb/sb.tar.gz -C /tmp/sb
-          bin=$(find /tmp/sb -type f -name sing-box -perm -u+x | head -1)
-          [ -n "$bin" ] || { echo "::error::sing-box binary not found in the release asset"; exit 1; }
-          chmod +x "$bin"
+          tar -xzf "$RUNNER_TEMP/core.tar.gz" -C "$RUNNER_TEMP/core"
+          bin="$RUNNER_TEMP/core/sing-box-${SING_BOX_TAG#v}-linux-amd64/sing-box"
           "$bin" version
-          rev=$("$bin" version | awk '/^Revision:/ {print $2}')
-          [ "$rev" = "${SING_BOX_TAG_COMMIT}" ] || {
-            echo "::error::binary Revision ${rev} != pinned ${SING_BOX_TAG_COMMIT}"; exit 1; }
+          test "$("$bin" version | awk '/^Revision:/ {print $2}')" = "$SING_BOX_TAG_COMMIT"
           echo "SING_BOX_BIN=$bin" >> "$GITHUB_ENV"
 
-      - name: keep the previous artifacts as the guardrail baseline
+      - name: Preserve the complete previous release
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/prev
-          # 基线必须是**完整**的四个文件（json + srs）：缺 .srs 会让等价性比对退化成一片假差异
-          ok=1
-          for f in echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs; do
-            [ -f "rules/$f" ] || ok=0
+          files=(echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs manifest-echs.json)
+          count=0
+          mkdir -p "$RUNNER_TEMP/previous"
+          for file in "${files[@]}"; do
+            if [ -f "rules/$file" ]; then
+              cp "rules/$file" "$RUNNER_TEMP/previous/"
+              count=$((count + 1))
+            fi
           done
-          if [ "$ok" = 1 ]; then
-            cp rules/echsdirect.json rules/echsdirect.srs rules/echsdirectip.json rules/echsdirectip.srs /tmp/prev/
+          if [ "$count" = 0 ]; then
+            echo "BASELINE=no" >> "$GITHUB_ENV"
+          elif [ "$count" = 5 ]; then
             echo "BASELINE=yes" >> "$GITHUB_ENV"
           else
-            echo "BASELINE=no (first publish or incomplete baseline: only the empty-set guardrails apply)" >> "$GITHUB_ENV"
+            echo '::error::Incomplete baseline; refusing to publish.'
+            exit 1
           fi
 
-      - name: fetch upstream lists (public, plain text)
+      - name: Run offline regressions
+        shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL --max-time 60 -o /tmp/domain.list \
+          python3 scripts/test-echs-rules.py --sing-box "$SING_BOX_BIN" \
+            2>&1 | tee "$RUNNER_TEMP/echs-tests.log"
+
+      - name: Fetch public upstream lists
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fLsS --retry 3 --max-time 60 -o "$RUNNER_TEMP/domain.list" \
             https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list
-          curl -fsSL --max-time 60 -o /tmp/ip.list \
+          curl -fLsS --retry 3 --max-time 60 -o "$RUNNER_TEMP/ip.list" \
             https://raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list
-          wc -l /tmp/domain.list /tmp/ip.list
 
-      - name: "convert + guardrails + compile (fail-closed: no publish on any failure)"
+      - name: Convert and compile into a staging directory
+        shell: bash
         run: |
           set -euo pipefail
-          args=(--out-dir rules --sing-box "$SING_BOX_BIN"
-                --domain-file /tmp/domain.list --ip-file /tmp/ip.list)
-          [ "$BASELINE" = yes ] && args+=(--baseline-dir /tmp/prev)
-          python3 scripts/convert-echs-lists.py "${args[@]}"
+          python3 scripts/convert-echs-lists.py --out-dir "$RUNNER_TEMP/candidate" \
+            --baseline-dir "$RUNNER_TEMP/previous" --sing-box "$SING_BOX_BIN" \
+            --domain-file "$RUNNER_TEMP/domain.list" --ip-file "$RUNNER_TEMP/ip.list"
 
-      - name: equivalence against the previous artifacts (when there is one)
-        if: env.BASELINE == 'yes'
+      - name: Verify source/binary consistency and sampled membership
+        shell: bash
         run: |
           set -euo pipefail
-          # 脚本自称即门禁：不一致时返回非 0（含条目数与逐条抽样判定）
-          python3 scripts/verify-echs-parity.py --old-dir /tmp/prev --new-dir rules \
-            --sing-box "$SING_BOX_BIN" --samples 20 --report /tmp/parity.json
-          python3 -c "import json;r=json.load(open('/tmp/parity.json'));assert r['ok'],r['failed'];print('parity ok; counts =',r['counts'])"
+          previous="$RUNNER_TEMP/previous"
+          if [ "$BASELINE" = no ]; then previous="$RUNNER_TEMP/candidate"; fi
+          python3 scripts/verify-echs-parity.py --old-dir "$previous" \
+            --new-dir "$RUNNER_TEMP/candidate" --sing-box "$SING_BOX_BIN" \
+            --samples 20 --report "$RUNNER_TEMP/parity.json"
 
-      - name: show what changed
+      - name: Verify reproducibility including the manifest
+        shell: bash
         run: |
           set -euo pipefail
-          git status --short rules/
-          git diff --stat rules/ || true
+          python3 scripts/convert-echs-lists.py --out-dir "$RUNNER_TEMP/rebuilt" \
+            --baseline-dir "$RUNNER_TEMP/candidate" --sing-box "$SING_BOX_BIN" \
+            --domain-file "$RUNNER_TEMP/domain.list" --ip-file "$RUNNER_TEMP/ip.list"
+          for file in echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs manifest-echs.json; do
+            cmp "$RUNNER_TEMP/candidate/$file" "$RUNNER_TEMP/rebuilt/$file"
+          done
 
-      - name: commit and push (only when something changed)
+      - name: Publish only validated changed artifacts
+        shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet -- rules/ && [ -z "$(git status --porcelain rules/)" ]; then
-            echo "no change in rules/ — nothing to publish"
+          for file in echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs manifest-echs.json; do
+            cp "$RUNNER_TEMP/candidate/$file" "rules/$file"
+            git add "rules/$file"
+          done
+          if git diff --cached --quiet; then
+            echo 'No upstream change; keeping the existing artifacts.'
             exit 0
           fi
-          git config user.name  'isongwrt-rules-bot'
+          git config user.name 'isongwrt-rules-bot'
           git config user.email 'isongwrt-rules-bot@users.noreply.github.com'
-          git add rules/echsdirect.json rules/echsdirect.srs \
-                  rules/echsdirectip.json rules/echsdirectip.srs rules/manifest-echs.json
-          {
-            echo "rules(echs): 自动更新 echsdirect / echsdirectip（$(date -u +%Y-%m-%dT%H:%M:%SZ)）"
-            echo
-            echo "source: https://github.com/echs-top/proxy (list/domain/direct.list, list/ip/direct.list)"
-            echo "compiler: sing-box ${SING_BOX_TAG} (Revision ${SING_BOX_TAG_COMMIT})"
-            echo "counts / sha256: 见 rules/manifest-echs.json"
-          } > /tmp/commit-msg.txt
-          git commit -F /tmp/commit-msg.txt
+          git commit -m 'rules: update ECH lists' \
+            -m "Source: echs-top/proxy. Compiler: ${SING_BOX_TAG} (${SING_BOX_TAG_COMMIT})." \
+            -m 'Changes: converted public lists and provenance. Verification: offline regressions, compiled membership and reproducibility passed. Rollback: revert this artifact commit.'
+          git pull --rebase origin main
           git push origin HEAD:main
+
+      - name: Retain verification output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: echs-verification
+          path: |
+            ${{ runner.temp }}/echs-tests.log
+            ${{ runner.temp }}/parity.json
+          if-no-files-found: warn
+          retention-days: 7
