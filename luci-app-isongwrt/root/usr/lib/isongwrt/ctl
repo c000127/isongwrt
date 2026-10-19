@@ -4,7 +4,7 @@
 # 内核来源：一律取自官方 Releases（SagerNet/sing-box），按架构自动匹配并优先 musl 构建；
 #          本项目不编译内核（CI 只构建 LuCI 包）。
 # 用法：ctl <status|channels|releases|installed|install|rollback|remove|config-*|ruleset-prefetch|service> ...
-#       ruleset-prefetch [--confdir DIR]  重启前预取全部远端规则集（只读，可离线/生产试跑）
+#       ruleset-prefetch [--confdir DIR]  重启前探测全部远端规则集可达性（HEAD/Range，只读；不写入 cache.db，不等于缓存预热）
 #       service <start|stop|restart|verify> [--skip-prefetch] [--verify-seconds N]
 #          restart/start 结束后会做强制存活后置检查（默认 +3s；计划内重启请用 15：
 #          `ctl service restart --verify-seconds 15` 或事后 `ctl service verify --seconds 15`）
@@ -1180,7 +1180,7 @@ do_ruleset_prefetch() { # [--confdir DIR] [--quiet] [--probe-timeout S] [--budge
 	wait
 
 	# 3) 汇总
-	_ok=0; _bad=""; _unprobed=""
+	_ok=0; _bad=""; _unprobed=""; _bn=0
 	_k=0
 	while [ "$_k" -lt "$_total" ]; do
 		_k=$((_k + 1))
@@ -1191,7 +1191,7 @@ do_ruleset_prefetch() { # [--confdir DIR] [--quiet] [--probe-timeout S] [--budge
 		elif [ "$(cat "$_tmpd/r.$_k")" = "ok" ]; then
 			_ok=$((_ok + 1))
 		else
-			_bad="${_bad}${_bad:+,}\"$(json_esc "$_u")\""
+			_bad="${_bad}${_bad:+,}\"$(json_esc "$_u")\""; _bn=$((_bn + 1))
 		fi
 	done
 	_el=$(( $(date +%s) - _t0 ))
@@ -1200,8 +1200,8 @@ do_ruleset_prefetch() { # [--confdir DIR] [--quiet] [--probe-timeout S] [--budge
 
 	_summary="\"probe\":{\"total\":$_total,\"reachable\":$_ok,\"elapsed_s\":$_el,\"budget_s\":$PREFETCH_BUDGET}"
 	if [ -n "$_bad" ]; then
-		printf '{"ok":false,"error":"rule-set probe: %s of %s unreachable (probe budget %ss, elapsed %ss)","unreachable":[%s],"unprobed":[%s],"reachable":%s,"total":%s,"elapsed_s":%s}\n' \
-			"$(( _total - _ok ))" "$_total" "$PREFETCH_BUDGET" "$_el" "$_bad" "$_unprobed" "$_ok" "$_total" "$_el" >&2
+		printf '{"ok":false,"error":"rule-set probe: %s of %s failed (probe budget %ss, elapsed %ss)","unreachable":[%s],"unprobed":[%s],"reachable":%s,"total":%s,"elapsed_s":%s}\n' \
+			"$_bn" "$_total" "$PREFETCH_BUDGET" "$_el" "$_bad" "$_unprobed" "$_ok" "$_total" "$_el" >&2
 		return 1
 	fi
 	if [ "$_un" = 1 ]; then
@@ -1384,7 +1384,7 @@ case "${1:-status}" in
 	                 _pf_warn=""
 	                 if [ "$_svc" != "stop" ] && [ "$_skip_pf" = 0 ] && prefetch_enabled; then
 	                     if ! do_ruleset_prefetch --confdir "$CONF_DIR" --quiet; then
-	                         if [ "$_svc" = "restart" ]; then
+	                         if [ "$_svc" = "restart" ] && core_running; then
 	                             printf '[ctl] rule-set probe failed: refusing to restart (the running core is left untouched)\n' >&2
 	                             logger -t isongwrt "rule-set probe failed: refusing to restart (running core untouched)" 2>/dev/null
 	                             exit 1
