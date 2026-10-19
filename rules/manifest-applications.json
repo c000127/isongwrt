@@ -1,0 +1,25 @@
+{
+  "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/applications.srs",
+  "upstream_sha256": "1720c4286e9ee3ac65e3a7299e45a8622d1ea84103406a9467ef9b143fc2cebc",
+  "source_sha256": "a2bfc7155001cf3fa2b190a698b2dc299946ed165b9db5db7fdb1221fc45ba72",
+  "srs_sha256": "8adf55a50efd39677acfb2c691c57ba4b45b5ef7a64fda8a969ad61834555537",
+  "counts": {
+    "process_name": 102,
+    "domain_suffix": 1
+  },
+  "upstream_license": "https://github.com/DustinWin/ruleset_geodata/blob/main/LICENSE",
+  "removed": {
+    "package_name": [
+      "io.tailscale.ipn.macos.network-extension",
+      "io.tailscale.ipn.macsys.network-extension"
+    ],
+    "domain_keyword": [
+      "aria2",
+      "thunder",
+      "xlliveud",
+      "xunlei",
+      "yunpan"
+    ]
+  },
+  "policy": "Keep process names and exact/suffix domains; remove substring routing and macOS package names."
+}
