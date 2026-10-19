@@ -1,0 +1,104 @@
+name: rules-applications
+
+on:
+  schedule:
+    # Daily at 04:37 Asia/Shanghai, after the upstream daily build.
+    - cron: '37 20 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/rules-applications.yml'
+      - 'scripts/build-applications-rules.py'
+      - 'scripts/test-applications-rules.py'
+  pull_request:
+    paths:
+      - '.github/workflows/rules-applications.yml'
+      - 'scripts/build-applications-rules.py'
+      - 'scripts/test-applications-rules.py'
+
+concurrency:
+  group: rules-applications-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  SING_BOX_TAG: v1.15.0-alpha.12
+  SING_BOX_REVISION: 25b0d5ea3e466d246c708ac0f20d0448110e566c
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Fetch the reviewed compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="sing-box-${SING_BOX_TAG#v}-linux-amd64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/core"
+          curl -fLsS --retry 3 --max-time 120 \
+            "https://github.com/SagerNet/sing-box/releases/download/${SING_BOX_TAG}/${archive}" \
+            -o "$RUNNER_TEMP/core.tar.gz"
+          tar -xzf "$RUNNER_TEMP/core.tar.gz" -C "$RUNNER_TEMP/core"
+          bin="$RUNNER_TEMP/core/sing-box-${SING_BOX_TAG#v}-linux-amd64/sing-box"
+          "$bin" version
+          test "$("$bin" version | awk '/^Revision:/ {print $2}')" = "$SING_BOX_REVISION"
+          echo "SING_BOX_BIN=$bin" >> "$GITHUB_ENV"
+      - name: Convert, compile and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/build-applications-rules.py --sing-box "$SING_BOX_BIN" \
+            --upstream-output "$RUNNER_TEMP/upstream.srs"
+          python3 scripts/test-applications-rules.py --sing-box "$SING_BOX_BIN" \
+            --upstream "$RUNNER_TEMP/upstream.srs"
+          cp rules/applications-safe.json "$RUNNER_TEMP/expected.json"
+          cp rules/applications-safe.srs "$RUNNER_TEMP/expected.srs"
+          cp rules/manifest-applications.json "$RUNNER_TEMP/expected-manifest.json"
+          python3 scripts/build-applications-rules.py --sing-box "$SING_BOX_BIN" \
+            --source-srs "$RUNNER_TEMP/upstream.srs"
+          cmp rules/applications-safe.json "$RUNNER_TEMP/expected.json"
+          cmp rules/applications-safe.srs "$RUNNER_TEMP/expected.srs"
+          cmp rules/manifest-applications.json "$RUNNER_TEMP/expected-manifest.json"
+      - name: Upload validated outputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: applications-safe
+          path: |
+            rules/applications-safe.json
+            rules/applications-safe.srs
+            rules/manifest-applications.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: applications-safe
+          path: rules
+      - name: Publish only changed validated rule files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add rules/applications-safe.json rules/applications-safe.srs rules/manifest-applications.json
+          if git diff --cached --quiet; then
+            echo 'No upstream change; keeping the existing artifacts.'
+            exit 0
+          fi
+          git config user.name 'isongwrt-rules-bot'
+          git config user.email 'isongwrt-rules-bot@users.noreply.github.com'
+          git commit -m 'rules: update applications-safe'
+          git pull --rebase origin main
+          git push origin HEAD:main

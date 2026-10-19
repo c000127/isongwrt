@@ -100,6 +100,12 @@ rules/echsdirect.{json,srs} + rules/echsdirectip.{json,srs} + rules/manifest-ech
 `service ↔ core flags` (`-D`/`-C`, work dir vs conf dir) · `core ↔ remote rule-set` (download client,
 update interval) · `CI ↔ release assets` (names, checksums, feed index).
 
+`applications-safe` uses `rules-applications.yml` (daily + manual): download the
+public upstream binary, remove domain substrings and platform package names,
+compile and test, then commit JSON/SRS/provenance together. Unknown semantics,
+empty data, published-entry removals or test failures block publication. No client
+configs or device settings are stored in this pipeline. Unchanged inputs create no commit.
+
 ## 3. Ideal end state and the path to it
 
 ### 3.1 Ideal state (what "done" looks like)

@@ -174,6 +174,11 @@ release binary (ss2022, no TLS). See [server/README.md](server/README.md).
 from the public echs-top lists and published by [.github/workflows/rules-echs.yml](.github/workflows/rules-echs.yml)
 (daily + manual, guardrailed, with `rules/manifest-echs.json` as provenance).
 
+`applications-safe` is built daily by
+[rules-applications.yml](.github/workflows/rules-applications.yml), preserving explicit
+domain/process rules while removing domain substrings and platform package names.
+See [rules/README.md](rules/README.md#applications-safe) for usage and guardrails.
+
 **Restart-time prefetch (opt-in, default off)**: before the panel's start/restart, `ctl` *probes*
 every `route.rule_set[].type=="remote"` URL — HEAD only (never the body), 4s per URL, **12s total
 budget**, 8 in parallel. `restart` aborts when a rule set is confirmed unreachable (the running core
