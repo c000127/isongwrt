@@ -1,31 +1,43 @@
 {
- "generated_at": "2026-10-19T08:55:16Z",
+ "conversion_version": 2,
+ "generated_at": "2026-10-19T13:45:01Z",
  "inputs_sha256": "6b1d30a57902761385c91cb81001a1178d1bcc9162dc0a0fba6cdcaadbaaba2b",
- "unchanged_since": null,
  "generator": "scripts/convert-echs-lists.py",
  "source_url": {
   "echsdirect": "https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list",
   "echsdirectip": "https://raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list"
  },
- "compiler": "sing-box",
+ "source_sha256": {
+  "domain": "3a5a3070fff4d31a901b93aff3ad1a50d8911e75b44ab9a838869325776f3c15",
+  "ip": "385a0c0d2de3e3f48f3f2bfe2029e4d2a4dc49db813bbed6ae34fd0181a217a5"
+ },
+ "compiler": "1.15.0-alpha.12",
+ "compiler_revision": "25b0d5ea3e466d246c708ac0f20d0448110e566c",
  "counts": {
   "domain_suffix": 32908,
   "domain": 105,
+  "domain_regex": 0,
   "ip_cidr": 10374
  },
  "previous": {
   "domain_suffix": 32908,
   "domain": 105,
+  "domain_regex": 0,
   "ip_cidr": 10374
  },
  "delta": {
   "domain_suffix": 0,
   "domain": 0,
+  "domain_regex": 0,
   "ip_cidr": 0
  },
  "unparsed_lines": {
   "domain": 0,
   "ip": 0
+ },
+ "parsed_lines": {
+  "domain": 33013,
+  "ip": 10374
  },
  "files": {
   "echsdirect.json": {
