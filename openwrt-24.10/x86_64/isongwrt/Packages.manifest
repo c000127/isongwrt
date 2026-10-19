@@ -1,0 +1,17 @@
+Package: luci-app-isongwrt
+Version: 0.2.0-r4
+Depends: libc, luci-base, ca-bundle
+Source: /feed/luci-app-isongwrt
+SourceName: luci-app-isongwrt
+License: MIT
+Section: luci
+SourceDateEpoch: 1792422013
+URL: https://github.com/c000127/isongwrt
+Maintainer: c000127
+Architecture: all
+Installed-Size: 122880
+Filename: luci-app-isongwrt_0.2.0-r4_all.ipk
+Size: 36888
+SHA256sum: 994f2dddf84435d3270baba10c3ab949e1c2bdf933200d3d606d11c6185c29e2
+Description:  Install and switch sing-box cores (stable/rc/beta/alpha), upload and validate configurations, control the service, view logs, and serve the official sing-box dashboard.
+

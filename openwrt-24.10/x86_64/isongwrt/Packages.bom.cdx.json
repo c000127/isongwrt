@@ -1,0 +1,1 @@
+{"serialNumber":"urn:uuid:00532a56-9dca-4680-ac20-9ce1bb3f5a12","components":[{"type":"application","name":"luci-app-isongwrt","licenses":[{"license":{"name":"MIT"}}],"version":"0.2.0"}],"metadata":{"timestamp":"2026-10-19T15:07:10Z"},"version":1,"specVersion":"1.4","bomFormat":"CycloneDX"}
