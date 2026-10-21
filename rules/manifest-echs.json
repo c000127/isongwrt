@@ -1,7 +1,7 @@
 {
  "conversion_version": 2,
- "generated_at": "2026-10-20T08:34:41Z",
- "inputs_sha256": "b7ec37a869ecfada1b33797f00f344a0f799c9f6bee28db5fa646ae1bd07602c",
+ "generated_at": "2026-10-21T08:36:22Z",
+ "inputs_sha256": "01b087edc2c64536ddf8b6c34a5e4850ba3a5e32c1736acf7b6a148931b1d382",
  "generator": "scripts/convert-echs-lists.py",
  "source_url": {
   "echsdirect": "https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list",
@@ -9,7 +9,7 @@
  },
  "source_sha256": {
   "domain": "3a5a3070fff4d31a901b93aff3ad1a50d8911e75b44ab9a838869325776f3c15",
-  "ip": "4609d77acb9dc68053cfa4a72671c0cd439933c023e807eefe1273d7240fd4be"
+  "ip": "89a251270ec36f4121783c417828b678e9caa938238003b00e8b80b2d8b5d831"
  },
  "compiler": "1.15.0-alpha.12",
  "compiler_revision": "25b0d5ea3e466d246c708ac0f20d0448110e566c",
@@ -17,19 +17,20 @@
   "domain_suffix": 32908,
   "domain": 105,
   "domain_regex": 0,
-  "ip_cidr": 10388
+  "ip_cidr": 10376
  },
  "previous": {
   "domain_suffix": 32908,
   "domain": 105,
   "domain_regex": 0,
-  "ip_cidr": 10374
+  "ip_cidr": 10388
  },
  "delta": {
   "domain_suffix": 0,
   "domain": 0,
   "domain_regex": 0,
-  "ip_cidr": 14
+  "ip_cidr": -12,
+  "ip_shrink_pct": 0.116
  },
  "unparsed_lines": {
   "domain": 0,
@@ -37,7 +38,7 @@
  },
  "parsed_lines": {
   "domain": 33013,
-  "ip": 10388
+  "ip": 10376
  },
  "files": {
   "echsdirect.json": {
@@ -49,12 +50,12 @@
    "bytes": 154102
   },
   "echsdirectip.json": {
-   "sha256": "743277b1a0cd214e07ac14997c1a0b056136bf449737f46ee8467ba390ba0801",
-   "bytes": 237794
+   "sha256": "09954e2f5a8b1dbb1f1318758c5705c0c823b6b6bb0bbe4f6a3b00d743b2434c",
+   "bytes": 237492
   },
   "echsdirectip.srs": {
-   "sha256": "92d420d874415a1cde9cedb1db7d31b0590f5a4a26fab18ca326a2bcfc4ea795",
-   "bytes": 41586
+   "sha256": "05eee5b9c05f4f81f900407d60e28ee59d74b5be2d6b45b6be040032dc3a2dc1",
+   "bytes": 41593
   }
  }
 }
