@@ -5,11 +5,17 @@ on:
     # Daily at 11:17 Asia/Shanghai.
     - cron: '17 3 * * *'
   workflow_dispatch:
+    inputs:
+      approve_moegirl_removal:
+        description: "Approve only the removal of moegirl.org from domain_suffix"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
       - '.github/workflows/rules-echs.yml'
       - 'scripts/convert-echs-lists.py'
+      - 'scripts/approve-echs-domain-loss.py'
       - 'scripts/verify-echs-parity.py'
       - 'scripts/test-echs-rules.py'
 
@@ -94,11 +100,18 @@ jobs:
 
       - name: Convert and compile into a staging directory
         shell: bash
+        env:
+          APPROVE_MOEGIRL_REMOVAL: ${{ inputs.approve_moegirl_removal }}
         run: |
           set -euo pipefail
+          extra=()
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$APPROVE_MOEGIRL_REMOVAL" = true ]; then
+            python3 scripts/approve-echs-domain-loss.py "$RUNNER_TEMP/previous" "$RUNNER_TEMP/domain.list"
+            extra+=(--allow-domain-loss)
+          fi
           python3 scripts/convert-echs-lists.py --out-dir "$RUNNER_TEMP/candidate" \
             --baseline-dir "$RUNNER_TEMP/previous" --sing-box "$SING_BOX_BIN" \
-            --domain-file "$RUNNER_TEMP/domain.list" --ip-file "$RUNNER_TEMP/ip.list"
+            --domain-file "$RUNNER_TEMP/domain.list" --ip-file "$RUNNER_TEMP/ip.list" "${extra[@]}"
 
       - name: Verify source/binary consistency and sampled membership
         shell: bash
