@@ -1,60 +1,60 @@
 {
  "conversion_version": 2,
- "generated_at": "2026-10-25T08:27:07Z",
- "inputs_sha256": "55da4207f8d1f8b8aeb53ff7eeb0df58c372bb9681af557481b0f5b68fe9bb92",
+ "generated_at": "2026-10-28T12:30:52Z",
+ "inputs_sha256": "e689d60d7b8f9c0edd83fb7960388feafadb958cbcbdd903819562feeac21a91",
  "generator": "scripts/convert-echs-lists.py",
  "source_url": {
   "echsdirect": "https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list",
   "echsdirectip": "https://raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list"
  },
  "source_sha256": {
-  "domain": "dde9e3fad1925e768fe789b7d370643137de81dc91f5e5674c37069491a0a9ed",
-  "ip": "1d83d1a34943f42b85c46e5296b89a91d0d5241081ed959638f54ac5c721af87"
+  "domain": "7283faa038e3ff0bcc6fa77d9946e81f201054a8db61f84608411999cfd709fc",
+  "ip": "6c2db527e869f226f522bd7c69964701feac1811e2b404411df8448c7b30ef1f"
  },
  "compiler": "1.15.0-alpha.12",
  "compiler_revision": "25b0d5ea3e466d246c708ac0f20d0448110e566c",
  "counts": {
-  "domain_suffix": 32910,
+  "domain_suffix": 32922,
   "domain": 105,
   "domain_regex": 0,
-  "ip_cidr": 10382
+  "ip_cidr": 10402
  },
  "previous": {
   "domain_suffix": 32910,
   "domain": 105,
   "domain_regex": 0,
-  "ip_cidr": 10380
+  "ip_cidr": 10382
  },
  "delta": {
-  "domain_suffix": 0,
+  "domain_suffix": 12,
   "domain": 0,
   "domain_regex": 0,
-  "ip_cidr": 2
+  "ip_cidr": 20
  },
  "unparsed_lines": {
   "domain": 0,
   "ip": 0
  },
  "parsed_lines": {
-  "domain": 33015,
-  "ip": 10382
+  "domain": 33027,
+  "ip": 10402
  },
  "files": {
   "echsdirect.json": {
-   "sha256": "3be2e57096ace1e3189bc31605fa6ea853348d27abd2d1fb0b7410ce274ad928",
-   "bytes": 667749
+   "sha256": "00cf0b9f62886abe0094d683e15d1ec8b313d94be8655a7f940f788cf2f84eb8",
+   "bytes": 667997
   },
   "echsdirect.srs": {
-   "sha256": "d35d38407411134433894acff950c8b94ce7660b7e31e2480c1360e7328d1815",
-   "bytes": 154083
+   "sha256": "5f8637a27d29a7c043c75c3da4316d25a7a8aa5d727508898e421619b1a34429",
+   "bytes": 154184
   },
   "echsdirectip.json": {
-   "sha256": "70f3ce5b9787c2617a76f9d1aa4ab961950dda44b2e7f60607d2316042d2dbea",
-   "bytes": 237638
+   "sha256": "f9c7ec9b1a82b1b29cfcdfcbe1500545b089f741cd40ccebdf6263766a3d61cb",
+   "bytes": 238105
   },
   "echsdirectip.srs": {
-   "sha256": "0cb9501dc72c6d67eca36ae4beeb26e4ed04b65ab03c9bfa203892d26b34b3b4",
-   "bytes": 41599
+   "sha256": "6bc254b95eed6dd3a8aca3251c32982f565656c57304d7a7c08a4258aa8246e3",
+   "bytes": 41688
   }
  }
 }
