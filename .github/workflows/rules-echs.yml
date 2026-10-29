@@ -1,166 +1,58 @@
-name: rules-echs
-
+name: rules-echs-domain
 on:
   schedule:
-    # Daily at 11:17 Asia/Shanghai.
     - cron: '17 3 * * *'
   workflow_dispatch:
-    inputs:
-      approve_moegirl_removal:
-        description: "Approve only the removal of moegirl.org from domain_suffix"
-        type: boolean
-        default: false
   push:
     branches: [main]
     paths:
       - '.github/workflows/rules-echs.yml'
+      - 'scripts/update-echs-domain.py'
+      - 'scripts/test-echs-domain.py'
       - 'scripts/convert-echs-lists.py'
-      - 'scripts/approve-echs-domain-loss.py'
-      - 'scripts/verify-echs-parity.py'
-      - 'scripts/test-echs-rules.py'
-
 concurrency:
-  group: rules-echs-${{ github.ref }}
+  group: rules-echs-domain-${{ github.ref }}
   cancel-in-progress: false
-
 permissions:
   contents: read
-
 env:
   SING_BOX_TAG: v1.15.0-alpha.12
   SING_BOX_TAG_COMMIT: 25b0d5ea3e466d246c708ac0f20d0448110e566c
-  SING_BOX_ASSET: sing-box-1.15.0-alpha.12-linux-amd64.tar.gz
-
 jobs:
-  convert-and-publish:
-    name: convert + verify + publish
+  update-domain:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      - name: Check the pinned tag and compiler revision
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Verify and install pinned compiler
         shell: bash
         run: |
           set -euo pipefail
-          got=$(curl -fLsS --retry 3 --max-time 30 -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/SagerNet/sing-box/git/ref/tags/${SING_BOX_TAG}" \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
+          got=$(curl -fLsS --retry 3 -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/SagerNet/sing-box/git/ref/tags/${SING_BOX_TAG}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["object"]["sha"])')
           test "$got" = "$SING_BOX_TAG_COMMIT"
-          mkdir -p "$RUNNER_TEMP/core"
-          curl -fLsS --retry 3 --max-time 120 -o "$RUNNER_TEMP/core.tar.gz" \
-            "https://github.com/SagerNet/sing-box/releases/download/${SING_BOX_TAG}/${SING_BOX_ASSET}"
-          tar -xzf "$RUNNER_TEMP/core.tar.gz" -C "$RUNNER_TEMP/core"
-          bin="$RUNNER_TEMP/core/sing-box-${SING_BOX_TAG#v}-linux-amd64/sing-box"
-          "$bin" version
+          curl -fLsS --retry 3 -o "$RUNNER_TEMP/core.tar.gz" "https://github.com/SagerNet/sing-box/releases/download/${SING_BOX_TAG}/sing-box-1.15.0-alpha.12-linux-amd64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/core.tar.gz" -C "$RUNNER_TEMP"
+          bin="$RUNNER_TEMP/sing-box-1.15.0-alpha.12-linux-amd64/sing-box"
           test "$("$bin" version | awk '/^Revision:/ {print $2}')" = "$SING_BOX_TAG_COMMIT"
           echo "SING_BOX_BIN=$bin" >> "$GITHUB_ENV"
-
-      - name: Preserve the complete previous release
+      - name: Fetch and validate domain set
         shell: bash
         run: |
           set -euo pipefail
-          files=(echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs manifest-echs.json)
-          count=0
-          mkdir -p "$RUNNER_TEMP/previous"
-          for file in "${files[@]}"; do
-            if [ -f "rules/$file" ]; then
-              cp "rules/$file" "$RUNNER_TEMP/previous/"
-              count=$((count + 1))
-            fi
-          done
-          if [ "$count" = 0 ]; then
-            echo "BASELINE=no" >> "$GITHUB_ENV"
-          elif [ "$count" = 5 ]; then
-            echo "BASELINE=yes" >> "$GITHUB_ENV"
-          else
-            echo '::error::Incomplete baseline; refusing to publish.'
-            exit 1
-          fi
-
-      - name: Run offline regressions
+          curl -fLsS --retry 3 --max-time 60 -o "$RUNNER_TEMP/domain.list" https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list
+          DOMAIN_FILE="$RUNNER_TEMP/domain.list" python3 scripts/test-echs-domain.py
+          DOMAIN_FILE="$RUNNER_TEMP/domain.list" python3 scripts/update-echs-domain.py
+      - name: Publish changed domain artifacts
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/test-echs-rules.py --sing-box "$SING_BOX_BIN" \
-            2>&1 | tee "$RUNNER_TEMP/echs-tests.log"
-
-      - name: Fetch public upstream lists
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fLsS --retry 3 --max-time 60 -o "$RUNNER_TEMP/domain.list" \
-            https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list
-          curl -fLsS --retry 3 --max-time 60 -o "$RUNNER_TEMP/ip.list" \
-            https://raw.githubusercontent.com/echs-top/proxy/main/list/ip/direct.list
-
-      - name: Convert and compile into a staging directory
-        shell: bash
-        env:
-          APPROVE_MOEGIRL_REMOVAL: ${{ inputs.approve_moegirl_removal }}
-        run: |
-          set -euo pipefail
-          extra=()
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$APPROVE_MOEGIRL_REMOVAL" = true ]; then
-            python3 scripts/approve-echs-domain-loss.py "$RUNNER_TEMP/previous" "$RUNNER_TEMP/domain.list"
-            extra+=(--allow-domain-loss)
-          fi
-          python3 scripts/convert-echs-lists.py --out-dir "$RUNNER_TEMP/candidate" \
-            --baseline-dir "$RUNNER_TEMP/previous" --sing-box "$SING_BOX_BIN" \
-            --domain-file "$RUNNER_TEMP/domain.list" --ip-file "$RUNNER_TEMP/ip.list" "${extra[@]}"
-
-      - name: Verify source/binary consistency and sampled membership
-        shell: bash
-        run: |
-          set -euo pipefail
-          previous="$RUNNER_TEMP/previous"
-          if [ "$BASELINE" = no ]; then previous="$RUNNER_TEMP/candidate"; fi
-          python3 scripts/verify-echs-parity.py --old-dir "$previous" \
-            --new-dir "$RUNNER_TEMP/candidate" --sing-box "$SING_BOX_BIN" \
-            --samples 20 --report "$RUNNER_TEMP/parity.json"
-
-      - name: Verify reproducibility including the manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 scripts/convert-echs-lists.py --out-dir "$RUNNER_TEMP/rebuilt" \
-            --baseline-dir "$RUNNER_TEMP/candidate" --sing-box "$SING_BOX_BIN" \
-            --domain-file "$RUNNER_TEMP/domain.list" --ip-file "$RUNNER_TEMP/ip.list"
-          for file in echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs manifest-echs.json; do
-            cmp "$RUNNER_TEMP/candidate/$file" "$RUNNER_TEMP/rebuilt/$file"
-          done
-
-      - name: Publish only validated changed artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          for file in echsdirect.json echsdirect.srs echsdirectip.json echsdirectip.srs manifest-echs.json; do
-            cp "$RUNNER_TEMP/candidate/$file" "rules/$file"
-            git add "rules/$file"
-          done
-          if git diff --cached --quiet; then
-            echo 'No upstream change; keeping the existing artifacts.'
-            exit 0
-          fi
+          git add rules/echsdirect.json rules/echsdirect.srs rules/manifest-echs-domain.json
+          if git diff --cached --quiet; then exit 0; fi
           git config user.name 'isongwrt-rules-bot'
           git config user.email 'isongwrt-rules-bot@users.noreply.github.com'
-          git commit -m 'rules: update ECH lists' \
-            -m "Source: echs-top/proxy. Compiler: ${SING_BOX_TAG} (${SING_BOX_TAG_COMMIT})." \
-            -m 'Changes: converted public lists and provenance. Verification: offline regressions, compiled membership and reproducibility passed. Rollback: revert this artifact commit.'
+          git commit -m 'rules: update ECH domain list'
           git pull --rebase origin main
           git push origin HEAD:main
-
-      - name: Retain verification output
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: echs-verification
-          path: |
-            ${{ runner.temp }}/echs-tests.log
-            ${{ runner.temp }}/parity.json
-          if-no-files-found: warn
-          retention-days: 7
