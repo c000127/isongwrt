@@ -2,12 +2,12 @@
  "counts": {
   "domain": 107,
   "domain_regex": 0,
-  "domain_suffix": 32925
+  "domain_suffix": 32930
  },
  "files": {
-  "echsdirect.json": "144d8bf5ec101b49737d8c60f118d81f5673dcbf2e249e37c605ca343cb6d0d3",
-  "echsdirect.srs": "c855af61560f133585ed16fe5b565ffce8894f66a1447fe3f1ba7a8911ba3c4c"
+  "echsdirect.json": "5fbf9a5ec851fd09334f2075f8756da26f2f90db144deffd87125a4d9ec046e7",
+  "echsdirect.srs": "28737c33f8d74e085b1c7a1b5072ce70702378d188e3ac2fa57c90aff49a778c"
  },
- "source_sha256": "ab1b5585990ee36a8fd37a5c7d0c017f5f96378a587f9d8c5ba2768ec7c68f86",
+ "source_sha256": "e4e33b083c89571f9901841a7d1e3b222659cf38e1e6eaa19b37c7ae15991040",
  "source_url": "https://raw.githubusercontent.com/echs-top/proxy/main/list/domain/direct.list"
 }
